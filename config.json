@@ -1,0 +1,11 @@
+{
+  "device": {
+    "type": "fpga",
+    "remote": "",
+    "extra_args": []
+  },
+  "server": {
+    "name": "nevercheese-pcileech-memprocfs-mcp",
+    "version": "1.0.0"
+  }
+}
