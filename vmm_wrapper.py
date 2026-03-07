@@ -82,6 +82,14 @@ def validate_process_name(name: str) -> str:
     return name
 
 
+def _format_size(size: int) -> str:
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size} B"
+
+
 def format_hex_dump(data: bytes, base_addr: int) -> str:
     lines = []
     for i in range(0, len(data), 16):
@@ -510,6 +518,271 @@ class VmmWrapper:
             raise PCILeechError(f"Module list failed: {e}")
 
         return modules
+
+    # ==================== Game / RE Tools ====================
+
+    def aob_scan(self, pattern: str, pid: int | None = None,
+                 process_name: str | None = None,
+                 module: str | None = None,
+                 find_all: bool = False) -> list[dict]:
+        """Array-of-bytes scan with ?? wildcard support in process virtual memory."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required for AOB scan")
+
+        # Parse pattern: "4D 5A ?? ?? 50 45" -> (bytes_pattern, mask)
+        tokens = pattern.strip().replace(',', ' ').split()
+        pat_bytes = []
+        mask = []
+        for token in tokens:
+            token = token.strip()
+            if token in ('??', '?', 'xx', 'XX'):
+                pat_bytes.append(0)
+                mask.append(False)
+            else:
+                if len(token) != 2 or not _HEX_PATTERN.fullmatch(token):
+                    raise PCILeechError(f"Invalid AOB token: '{token}'. Use hex bytes or ?? wildcards.")
+                pat_bytes.append(int(token, 16))
+                mask.append(True)
+
+        if not pat_bytes:
+            raise PCILeechError("Empty AOB pattern")
+
+        pat_len = len(pat_bytes)
+        import memprocfs
+
+        # Determine scan ranges
+        ranges = []
+        if module:
+            try:
+                mod = proc.module(module)
+                ranges.append((mod.base, mod.image_size))
+            except Exception as e:
+                raise PCILeechError(f"Module '{module}' not found: {e}")
+        else:
+            try:
+                for vad in proc.maps.vad():
+                    start = vad.get('start', vad.get('va', 0))
+                    size = vad.get('size', vad.get('cb', 0))
+                    # Only scan committed, readable regions
+                    if size > 0 and size <= 64 * 1024 * 1024:
+                        ranges.append((start, size))
+            except Exception:
+                raise PCILeechError("Failed to enumerate process memory regions")
+
+        matches = []
+        for base, size in ranges:
+            try:
+                data = proc.memory.read(base, size, memprocfs.FLAG_ZEROPAD_ON_FAIL)
+            except Exception:
+                continue
+
+            offset = 0
+            while offset <= len(data) - pat_len:
+                found = True
+                for i in range(pat_len):
+                    if mask[i] and data[offset + i] != pat_bytes[i]:
+                        found = False
+                        break
+                if found:
+                    match_addr = base + offset
+                    context = data[offset:offset + min(32, len(data) - offset)]
+                    matches.append({
+                        'address': f'0x{match_addr:x}',
+                        'context': context.hex(),
+                    })
+                    if not find_all:
+                        return matches
+                    offset += pat_len  # skip past match
+                else:
+                    offset += 1
+
+        return matches
+
+    def module_dump(self, pid: int | None = None,
+                    process_name: str | None = None,
+                    module_name: str = "",
+                    output_file: str | None = None) -> dict:
+        """Dump a full PE module from process memory to disk."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+        if not module_name:
+            raise PCILeechError("module_name is required")
+
+        try:
+            mod = proc.module(module_name)
+        except Exception as e:
+            raise PCILeechError(f"Module '{module_name}' not found: {e}")
+
+        import memprocfs
+        try:
+            data = proc.memory.read(mod.base, mod.image_size,
+                                    memprocfs.FLAG_ZEROPAD_ON_FAIL)
+        except Exception as e:
+            raise MemoryAccessError(f"Failed to read module memory: {e}")
+
+        if output_file is None:
+            output_file = f"{module_name}_0x{mod.base:x}.bin"
+
+        with open(output_file, 'wb') as f:
+            f.write(data)
+
+        return {
+            'module': module_name,
+            'base': f'0x{mod.base:x}',
+            'size': mod.image_size,
+            'file': os.path.abspath(output_file),
+            'success': True,
+        }
+
+    def module_exports(self, pid: int | None = None,
+                       process_name: str | None = None,
+                       module_name: str = "") -> list[dict]:
+        """List exported functions from a module's Export Address Table."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+        if not module_name:
+            raise PCILeechError("module_name is required")
+
+        try:
+            mod = proc.module(module_name)
+        except Exception as e:
+            raise PCILeechError(f"Module '{module_name}' not found: {e}")
+
+        exports = []
+        try:
+            eat = mod.maps.eat()
+            entries = eat if isinstance(eat, list) else eat.get('e', eat.get('entries', []))
+            for entry in entries:
+                exports.append({
+                    'name': entry.get('name', entry.get('fn', '')),
+                    'ordinal': entry.get('ordinal', entry.get('ord', 0)),
+                    'address': f'0x{entry.get("va", entry.get("offset", 0)):x}',
+                })
+        except Exception as e:
+            raise PCILeechError(f"Failed to read exports: {e}")
+
+        return exports
+
+    def module_imports(self, pid: int | None = None,
+                       process_name: str | None = None,
+                       module_name: str = "") -> list[dict]:
+        """List imported functions from a module's Import Address Table."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+        if not module_name:
+            raise PCILeechError("module_name is required")
+
+        try:
+            mod = proc.module(module_name)
+        except Exception as e:
+            raise PCILeechError(f"Module '{module_name}' not found: {e}")
+
+        imports = []
+        try:
+            iat = mod.maps.iat()
+            entries = iat if isinstance(iat, list) else iat.get('e', iat.get('entries', []))
+            for entry in entries:
+                imports.append({
+                    'module': entry.get('module', entry.get('dll', '')),
+                    'name': entry.get('name', entry.get('fn', '')),
+                    'address': f'0x{entry.get("va", entry.get("offset", 0)):x}',
+                })
+        except Exception as e:
+            raise PCILeechError(f"Failed to read imports: {e}")
+
+        return imports
+
+    def pointer_read(self, base_address: str, offsets: list[int],
+                     read_size: int = 8,
+                     pid: int | None = None,
+                     process_name: str | None = None) -> dict:
+        """Follow a multi-level pointer chain and read the final value."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+
+        import memprocfs
+        addr = parse_hex_address(base_address, "base_address")
+        chain = [f'0x{addr:x}']
+
+        try:
+            for i, offset in enumerate(offsets):
+                # Read pointer at current address
+                ptr_data = proc.memory.read(addr, 8, memprocfs.FLAG_ZEROPAD_ON_FAIL)
+                addr = struct.unpack_from('<Q', ptr_data, 0)[0]
+                if addr == 0:
+                    return {
+                        'success': False,
+                        'error': f'Null pointer at level {i} (after reading 0x{int.from_bytes(ptr_data, "little"):x})',
+                        'chain': chain,
+                        'final_address': None,
+                        'value': None,
+                    }
+                addr += offset
+                chain.append(f'0x{addr:x}')
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'Failed at pointer level {i}: {e}',
+                'chain': chain,
+                'final_address': None,
+                'value': None,
+            }
+
+        # Read the final value
+        try:
+            final_data = proc.memory.read(addr, read_size, memprocfs.FLAG_ZEROPAD_ON_FAIL)
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'Failed to read final value at 0x{addr:x}: {e}',
+                'chain': chain,
+                'final_address': f'0x{addr:x}',
+                'value': None,
+            }
+
+        # Format value based on size
+        if read_size <= 8:
+            int_val = int.from_bytes(final_data[:read_size], 'little')
+            value_str = f'0x{int_val:x} ({int_val})'
+        else:
+            value_str = final_data.hex()
+
+        return {
+            'success': True,
+            'error': None,
+            'chain': chain,
+            'final_address': f'0x{addr:x}',
+            'value': value_str,
+            'raw_hex': final_data.hex(),
+        }
+
+    def process_regions(self, pid: int | None = None,
+                        process_name: str | None = None) -> list[dict]:
+        """List virtual memory regions (VADs) for a process with protection flags."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+
+        regions = []
+        try:
+            for vad in proc.maps.vad():
+                regions.append({
+                    'start': f'0x{vad.get("start", vad.get("va", 0)):x}',
+                    'size': vad.get('size', vad.get('cb', 0)),
+                    'size_str': _format_size(vad.get('size', vad.get('cb', 0))),
+                    'protection': vad.get('protection', vad.get('flags', '')),
+                    'type': vad.get('type', vad.get('tag', '')),
+                    'info': vad.get('info', vad.get('text', '')),
+                })
+        except Exception as e:
+            raise PCILeechError(f"Failed to enumerate regions: {e}")
+
+        return regions
 
     # ==================== FPGA / Advanced ====================
 

@@ -74,14 +74,16 @@ def test_mcp_tools():
     from main import server, list_tools
 
     tools = asyncio.run(list_tools())
-    check(f"tool count is 15", len(tools) == 15)
+    check(f"tool count is 21", len(tools) == 21)
 
     expected_names = {
         "memory_read", "memory_write", "memory_format",
         "system_info", "memory_probe", "memory_dump",
         "memory_search", "memory_patch", "process_list",
         "translate_virt2phys", "process_virt2phys",
-        "module_list", "benchmark", "tlp_send", "fpga_config",
+        "module_list", "aob_scan", "module_dump",
+        "module_exports", "module_imports", "pointer_read",
+        "process_regions", "benchmark", "tlp_send", "fpga_config",
     }
     actual_names = {t.name for t in tools}
     check("all expected tools present", actual_names == expected_names)
@@ -278,6 +280,118 @@ def test_mock_module_list():
     check("shows PID in header", "PID 1234" in text)
 
 
+def test_mock_aob_scan():
+    print("\n--- Mock AOB Scan ---")
+    from main import handle_aob_scan
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.aob_scan.return_value = [
+        {'address': '0x7ff6a001234', 'context': '4d5a900003000000'},
+    ]
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_aob_scan({
+            "pattern": "4D 5A ?? ?? 03 00",
+            "pid": 1234,
+            "module": "game.exe",
+        }))
+
+    text = result[0].text
+    check("shows match address", "0x7ff6a001234" in text)
+    check("shows pattern", "4D 5A ?? ?? 03 00" in text)
+    check("shows module scope", "game.exe" in text)
+
+
+def test_mock_module_dump():
+    print("\n--- Mock Module Dump ---")
+    from main import handle_module_dump
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.module_dump.return_value = {
+        'module': 'client.dll', 'base': '0x7ff6a000000',
+        'size': 0x200000, 'file': '/tmp/client.dll_0x7ff6a000000.bin', 'success': True,
+    }
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_module_dump({
+            "module_name": "client.dll", "pid": 1234,
+        }))
+
+    text = result[0].text
+    check("shows module name", "client.dll" in text)
+    check("shows file path", "/tmp/client.dll" in text)
+    check("shows size", "0x200000" in text)
+
+
+def test_mock_module_exports():
+    print("\n--- Mock Module Exports ---")
+    from main import handle_module_exports
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.module_exports.return_value = [
+        {'name': 'CreateInterface', 'ordinal': 1, 'address': '0x7ff6a012340'},
+        {'name': 'GetProcAddress', 'ordinal': 2, 'address': '0x7ff6a012380'},
+    ]
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_module_exports({
+            "module_name": "client.dll", "pid": 1234,
+        }))
+
+    text = result[0].text
+    check("shows export count", "2 export" in text)
+    check("shows function name", "CreateInterface" in text)
+
+
+def test_mock_pointer_read():
+    print("\n--- Mock Pointer Read ---")
+    from main import handle_pointer_read
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.pointer_read.return_value = {
+        'success': True,
+        'error': None,
+        'chain': ['0x7ff6a001000', '0x1a2b3c4d60', '0x1a2b3c4da8'],
+        'final_address': '0x1a2b3c4da8',
+        'value': '0x64 (100)',
+        'raw_hex': '6400000000000000',
+    }
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_pointer_read({
+            "base_address": "0x7ff6a001000",
+            "offsets": [0x50, 0x48],
+            "read_size": 8,
+            "pid": 1234,
+        }))
+
+    text = result[0].text
+    check("shows final address", "0x1a2b3c4da8" in text)
+    check("shows value", "100" in text)
+    check("shows chain", "->" in text)
+
+
+def test_mock_process_regions():
+    print("\n--- Mock Process Regions ---")
+    from main import handle_process_regions
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.process_regions.return_value = [
+        {'start': '0x7ff6a000000', 'size': 0x200000, 'size_str': '2.0 MB',
+         'protection': 'PAGE_EXECUTE_READ', 'type': 'Image', 'info': 'game.exe'},
+        {'start': '0x1a000000', 'size': 0x1000, 'size_str': '4.0 KB',
+         'protection': 'PAGE_READWRITE', 'type': 'Private', 'info': ''},
+    ]
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_process_regions({"pid": 1234}))
+
+    text = result[0].text
+    check("shows region count", "2 region" in text)
+    check("shows protection", "PAGE_EXECUTE_READ" in text)
+    check("shows game.exe", "game.exe" in text)
+
+
 def test_error_handling():
     print("\n--- Error Handling ---")
     from main import call_tool, handle_memory_write
@@ -334,6 +448,11 @@ if __name__ == "__main__":
     test_mock_system_info()
     test_mock_benchmark()
     test_mock_module_list()
+    test_mock_aob_scan()
+    test_mock_module_dump()
+    test_mock_module_exports()
+    test_mock_pointer_read()
+    test_mock_process_regions()
     test_error_handling()
 
     print("\n" + "=" * 60)

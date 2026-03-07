@@ -386,6 +386,191 @@ async def list_tools() -> list[Tool]:
                 "required": [],
             },
         ),
+        # ==================== Game / RE Tools ====================
+        Tool(
+            name="aob_scan",
+            description=(
+                "Array-of-bytes pattern scan with ?? wildcard support in a process's virtual memory. "
+                "This is the primary tool for finding code signatures, byte patterns, and instruction "
+                "sequences in game/application memory. Supports wildcards for bytes that vary between runs. "
+                "Scans all committed memory regions by default, or a specific module if specified. "
+                "Example pattern: '48 8B 05 ?? ?? ?? ?? 48 85 C0' to find a mov rax,[rip+??] with test. "
+                "Use process_list to find the PID, then optionally module_list to find a module name."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Space-separated hex bytes with ?? wildcards. Examples: '4D 5A ?? ?? 50 45', '48 89 5C 24 ?? 57'. Use ?? for unknown bytes.",
+                    },
+                    "pid": {
+                        "type": "integer",
+                        "description": "Target process ID. Mutually exclusive with process_name.",
+                    },
+                    "process_name": {
+                        "type": "string",
+                        "description": "Target process name. Mutually exclusive with pid.",
+                    },
+                    "module": {
+                        "type": "string",
+                        "description": "Restrict scan to this module only (e.g. 'game.exe', 'client.dll'). Much faster than scanning all memory.",
+                    },
+                    "find_all": {
+                        "type": "boolean",
+                        "description": "Find all matches. Default: false (stop at first match).",
+                        "default": False,
+                    },
+                },
+                "required": ["pattern"],
+            },
+        ),
+        Tool(
+            name="module_dump",
+            description=(
+                "Dump a complete PE module (EXE/DLL) from a process's memory to disk. "
+                "Use this for SDK extraction, reverse engineering in IDA/Ghidra, or offline analysis. "
+                "Reads the full module image including PE headers, sections, and data. "
+                "Zero-pads any unreadable pages. Use module_list first to find available modules."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pid": {
+                        "type": "integer",
+                        "description": "Target process ID. Mutually exclusive with process_name.",
+                    },
+                    "process_name": {
+                        "type": "string",
+                        "description": "Target process name. Mutually exclusive with pid.",
+                    },
+                    "module_name": {
+                        "type": "string",
+                        "description": "Name of the module to dump (e.g. 'game.exe', 'client.dll', 'kernel32.dll'). Use module_list to find names.",
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": "Output file path. Default: '<module>_<base>.bin'.",
+                    },
+                },
+                "required": ["module_name"],
+            },
+        ),
+        Tool(
+            name="module_exports",
+            description=(
+                "List all exported functions (Export Address Table) from a loaded module. "
+                "Shows function name, ordinal, and virtual address. Essential for finding SDK "
+                "function entry points, hooking targets, or understanding a DLL's public API. "
+                "Use module_list first to find the module name."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pid": {
+                        "type": "integer",
+                        "description": "Target process ID. Mutually exclusive with process_name.",
+                    },
+                    "process_name": {
+                        "type": "string",
+                        "description": "Target process name. Mutually exclusive with pid.",
+                    },
+                    "module_name": {
+                        "type": "string",
+                        "description": "Module to read exports from (e.g. 'kernel32.dll', 'ntdll.dll').",
+                    },
+                },
+                "required": ["module_name"],
+            },
+        ),
+        Tool(
+            name="module_imports",
+            description=(
+                "List all imported functions (Import Address Table) from a loaded module. "
+                "Shows which DLLs the module depends on and which functions it calls. "
+                "Useful for understanding module dependencies, finding cross-references, "
+                "and identifying potential hook targets."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pid": {
+                        "type": "integer",
+                        "description": "Target process ID. Mutually exclusive with process_name.",
+                    },
+                    "process_name": {
+                        "type": "string",
+                        "description": "Target process name. Mutually exclusive with pid.",
+                    },
+                    "module_name": {
+                        "type": "string",
+                        "description": "Module to read imports from (e.g. 'game.exe', 'client.dll').",
+                    },
+                },
+                "required": ["module_name"],
+            },
+        ),
+        Tool(
+            name="pointer_read",
+            description=(
+                "Follow a multi-level pointer chain and read the value at the final address. "
+                "Given a base address and a list of offsets, reads: [[base]+offset0]+offset1]+... "
+                "This is essential for reading game values that use pointer chains "
+                "(e.g. player health at [[game.exe+0x1234]+0x10]+0x48). "
+                "Returns the resolved chain, final address, and value."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "base_address": {
+                        "type": "string",
+                        "description": "Starting address of the pointer chain in hex. Can be a module base + offset (calculate it first using module_list).",
+                    },
+                    "offsets": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "List of offsets to follow at each pointer level. Example: [0x10, 0x48, 0x20] for a 3-level chain.",
+                    },
+                    "read_size": {
+                        "type": "integer",
+                        "description": "Bytes to read at the final address (default: 8). Use 4 for int/float, 8 for int64/double/pointer.",
+                        "default": 8,
+                    },
+                    "pid": {
+                        "type": "integer",
+                        "description": "Target process ID. Mutually exclusive with process_name.",
+                    },
+                    "process_name": {
+                        "type": "string",
+                        "description": "Target process name. Mutually exclusive with pid.",
+                    },
+                },
+                "required": ["base_address", "offsets"],
+            },
+        ),
+        Tool(
+            name="process_regions",
+            description=(
+                "List all virtual memory regions (VAD entries) for a process with protection flags. "
+                "Shows address, size, protection (RWX), type (Image/Mapped/Private), and associated file. "
+                "Use this to understand a process's memory layout, find executable regions, "
+                "locate mapped files, or identify suspicious RWX allocations."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pid": {
+                        "type": "integer",
+                        "description": "Target process ID. Mutually exclusive with process_name.",
+                    },
+                    "process_name": {
+                        "type": "string",
+                        "description": "Target process name. Mutually exclusive with pid.",
+                    },
+                },
+                "required": [],
+            },
+        ),
         # ==================== Advanced / FPGA ====================
         Tool(
             name="benchmark",
@@ -496,6 +681,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "translate_virt2phys": handle_translate_virt2phys,
             "process_virt2phys": handle_process_virt2phys,
             "module_list": handle_module_list,
+            "aob_scan": handle_aob_scan,
+            "module_dump": handle_module_dump,
+            "module_exports": handle_module_exports,
+            "module_imports": handle_module_imports,
+            "pointer_read": handle_pointer_read,
+            "process_regions": handle_process_regions,
             "benchmark": handle_benchmark,
             "tlp_send": handle_tlp_send,
             "fpga_config": handle_fpga_config,
@@ -748,6 +939,201 @@ async def handle_module_list(args: dict) -> list[TextContent]:
     parts.append("-" * 60)
     for m in modules:
         parts.append(f"{m['base']:>18}  {m['size']:>12}  {m['name']}")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_aob_scan(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    matches = await asyncio.to_thread(
+        w.aob_scan,
+        args["pattern"],
+        pid=pid,
+        process_name=process_name,
+        module=args.get("module"),
+        find_all=args.get("find_all", False),
+    )
+
+    target = f"PID {pid}" if pid else process_name
+    module_info = f" in {args['module']}" if args.get("module") else ""
+    parts = [f"## AOB Scan Results ({target}{module_info})", "=" * 50, "",
+             f"**Pattern:** `{args['pattern']}`", ""]
+
+    if not matches:
+        parts.append("No matches found.")
+    else:
+        parts.append(f"Found {len(matches)} match(es):\n")
+        for i, m in enumerate(matches, 1):
+            parts.append(f"{i}. **{m['address']}**  `{m.get('context', '')}`")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_module_dump(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    result = await asyncio.to_thread(
+        w.module_dump,
+        pid=pid,
+        process_name=process_name,
+        module_name=args["module_name"],
+        output_file=args.get("output_file"),
+    )
+
+    parts = [
+        "## Module Dump Result", "=" * 50, "",
+        f"**Module:** {result['module']}",
+        f"**Base:** {result['base']}",
+        f"**Size:** {result['size']} bytes (0x{result['size']:x})",
+        f"**File:** {result['file']}",
+        f"**Success:** {result['success']}",
+    ]
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_module_exports(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    exports = await asyncio.to_thread(
+        w.module_exports,
+        pid=pid,
+        process_name=process_name,
+        module_name=args["module_name"],
+    )
+
+    parts = [f"## Exports: {args['module_name']}", "=" * 50, "",
+             f"Found {len(exports)} export(s):\n"]
+    parts.append(f"{'Ordinal':>8}  {'Address':>18}  {'Name'}")
+    parts.append("-" * 60)
+    for e in exports:
+        parts.append(f"{e['ordinal']:>8}  {e['address']:>18}  {e['name']}")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_module_imports(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    imports = await asyncio.to_thread(
+        w.module_imports,
+        pid=pid,
+        process_name=process_name,
+        module_name=args["module_name"],
+    )
+
+    parts = [f"## Imports: {args['module_name']}", "=" * 50, "",
+             f"Found {len(imports)} import(s):\n"]
+    parts.append(f"{'Address':>18}  {'Module':<30}  {'Name'}")
+    parts.append("-" * 70)
+    for imp in imports:
+        parts.append(f"{imp['address']:>18}  {imp['module']:<30}  {imp['name']}")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_pointer_read(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    result = await asyncio.to_thread(
+        w.pointer_read,
+        args["base_address"],
+        args["offsets"],
+        read_size=args.get("read_size", 8),
+        pid=pid,
+        process_name=process_name,
+    )
+
+    parts = ["## Pointer Chain Result", "=" * 50, ""]
+
+    # Show the chain
+    chain = result.get('chain', [])
+    offsets = args["offsets"]
+    chain_str = chain[0] if chain else args["base_address"]
+    for i, off in enumerate(offsets):
+        sign = '+' if off >= 0 else '-'
+        chain_str = f"[{chain_str}]{sign}0x{abs(off):x}"
+    parts.append(f"**Chain:** {chain_str}")
+    parts.append(f"**Resolved path:** {' -> '.join(chain)}")
+    parts.append("")
+
+    if result['success']:
+        parts.append(f"**Final address:** {result['final_address']}")
+        parts.append(f"**Value:** {result['value']}")
+        parts.append(f"**Raw:** {result['raw_hex']}")
+    else:
+        parts.append(f"**Failed:** {result['error']}")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_process_regions(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    regions = await asyncio.to_thread(
+        w.process_regions,
+        pid=pid,
+        process_name=process_name,
+    )
+
+    target = f"PID {pid}" if pid else process_name
+    parts = [f"## Memory Regions: {target}", "=" * 50, "",
+             f"Found {len(regions)} region(s):\n"]
+    parts.append(f"{'Address':>18}  {'Size':>10}  {'Protection':<16}  {'Type':<12}  {'Info'}")
+    parts.append("-" * 80)
+    for r in regions:
+        parts.append(
+            f"{r['start']:>18}  {r['size_str']:>10}  {str(r['protection']):<16}  "
+            f"{str(r['type']):<12}  {r.get('info', '')}"
+        )
 
     return [TextContent(type="text", text="\n".join(parts))]
 

@@ -20,14 +20,15 @@ This MCP server lets an AI assistant perform DMA-based memory operations on a ta
 
 ## Tools
 
-15 MCP tools organized by capability:
+21 MCP tools organized by capability:
 
 | Category | Tools |
 |---|---|
 | **Core Memory** | `memory_read`, `memory_write`, `memory_format` |
 | **System** | `system_info`, `memory_probe`, `memory_dump`, `memory_search`, `memory_patch`\*, `process_list` |
 | **Address Translation** | `translate_virt2phys`, `process_virt2phys` |
-| **Modules** | `module_list` |
+| **Modules** | `module_list`, `module_dump`, `module_exports`, `module_imports` |
+| **Game / RE** | `aob_scan`, `pointer_read`, `process_regions` |
 | **Advanced / FPGA** | `benchmark`, `tlp_send`, `fpga_config` |
 
 \* `memory_patch` is stubbed — `.sig` files are a CLI-only feature. Use `memory_search` + `memory_write` instead.
@@ -127,6 +128,22 @@ Write 90909090 (NOPs) to address 0x7ff7f3a90000 in process with PID 1234
 Run a DMA read benchmark
 ```
 
+```
+Scan for the AOB pattern "48 8B 05 ?? ?? ?? ?? 48 85 C0" in game.exe
+```
+
+```
+Dump the client.dll module from the game process to disk
+```
+
+```
+Show me the exports of engine2.dll in process cs2.exe
+```
+
+```
+Follow the pointer chain [[game.exe+0x1A8B230]+0x50]+0x100 in PID 5678 and read 4 bytes
+```
+
 ## Testing
 
 Run the test suite (no hardware needed):
@@ -136,7 +153,7 @@ source .venv/bin/activate
 python test_server.py
 ```
 
-All 66 tests use mocks and validate the full MCP pipeline without requiring a DMA device.
+All 86 tests use mocks and validate the full MCP pipeline without requiring a DMA device.
 
 ## Architecture
 
