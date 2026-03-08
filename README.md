@@ -20,7 +20,7 @@ This MCP server lets an AI assistant perform DMA-based memory operations on a ta
 
 ## Tools
 
-28 MCP tools organized by capability:
+34 MCP tools organized by capability:
 
 | Category | Tools |
 |---|---|
@@ -30,6 +30,8 @@ This MCP server lets an AI assistant perform DMA-based memory operations on a ta
 | **Modules** | `module_list`, `module_dump`, `module_exports`, `module_imports`, `pe_sections` |
 | **Game / RE** | `aob_scan`, `signature_resolve`, `pointer_read`, `process_regions` |
 | **Advanced RE** | `rtti_scan`, `struct_analyze`, `string_scan`, `memory_diff` |
+| **Pointer / XRef** | `pointer_scan`, `xref_scan` |
+| **Engine Tools** | `ue_dump_names`, `ue_dump_objects`, `ue_dump_sdk`, `unity_il2cpp_dump` |
 | **Advanced / FPGA** | `benchmark`, `tlp_send`, `fpga_config` |
 
 \* `memory_patch` is stubbed — `.sig` files are a CLI-only feature. Use `memory_search` + `memory_write` instead.
@@ -145,6 +147,26 @@ Show me the exports of engine2.dll in process cs2.exe
 Follow the pointer chain [[game.exe+0x1A8B230]+0x50]+0x100 in PID 5678 and read 4 bytes
 ```
 
+```
+Find all pointer chains from module bases to address 0x1a2b3c4d in PID 1234
+```
+
+```
+Find all code and data references to address 0x7ff6a013580 in game.exe
+```
+
+```
+Dump the UE5 GNames table at address 0x7ff6a500000 from the game process
+```
+
+```
+Generate a full C++ SDK from the Unreal Engine game with GObjects at 0x... and GNames at 0x...
+```
+
+```
+Dump IL2CPP metadata from the Unity game process
+```
+
 ## Testing
 
 Run the test suite (no hardware needed):
@@ -154,7 +176,7 @@ source .venv/bin/activate
 python test_server.py
 ```
 
-All 86 tests use mocks and validate the full MCP pipeline without requiring a DMA device.
+All 161 tests use mocks and validate the full MCP pipeline without requiring a DMA device.
 
 ## Architecture
 
@@ -166,6 +188,9 @@ Claude Code
 main.py              ← MCP server: tool schemas, handlers, formatting
     |
 vmm_wrapper.py       ← Native wrapper: device init, memory ops, process enum
+    |
+    ├── pointer_scanner.py  ← Pointer chain discovery + cross-reference scanning
+    ├── engine_tools.py     ← UE4/UE5 SDK dumping + Unity IL2CPP extraction
     |
     ├── memprocfs     ← High-level: processes, virtual memory, modules
     |     └── vmmpyc.so → libvmm.so → libleechcore.so

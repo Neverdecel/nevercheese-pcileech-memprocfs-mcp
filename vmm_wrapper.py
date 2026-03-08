@@ -1468,6 +1468,116 @@ class VmmWrapper:
             'changes': changes,
         }
 
+    # ==================== Pointer / XRef Scanning ====================
+
+    def pointer_scan(self, target_address: str,
+                     pid: int | None = None,
+                     process_name: str | None = None,
+                     max_depth: int = 5,
+                     max_offset: int = 4096,
+                     max_results: int = 100,
+                     module_filter: str | None = None) -> dict:
+        """Discover pointer chains from static module bases to a target address."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+        target = parse_hex_address(target_address)
+
+        from pointer_scanner import PointerScanner
+        scanner = PointerScanner(proc)
+        return scanner.scan(target, max_depth=max_depth, max_offset=max_offset,
+                            max_results=max_results, module_filter=module_filter)
+
+    def xref_scan(self, target_address: str,
+                  pid: int | None = None,
+                  process_name: str | None = None,
+                  module: str | None = None,
+                  scan_code: bool = True,
+                  scan_data: bool = True,
+                  max_results: int = 200) -> dict:
+        """Find all code/data references to a target address within a module."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+        if not module:
+            raise PCILeechError("module name is required for xref scan")
+        target = parse_hex_address(target_address)
+
+        from pointer_scanner import XRefScanner
+        scanner = XRefScanner(proc)
+        return scanner.scan(target, module_name=module, scan_code=scan_code,
+                            scan_data=scan_data, max_results=max_results)
+
+    # ==================== Engine Tools ====================
+
+    def ue_dump_names(self, gnames_address: str,
+                      pid: int | None = None,
+                      process_name: str | None = None,
+                      max_names: int = 200000,
+                      ue_version: str = 'ue5') -> dict:
+        """Read UE FNamePool and dump all name entries."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+
+        from engine_tools import UnrealEngine
+        ue = UnrealEngine(proc, ue_version=ue_version)
+        gnames = parse_hex_address(gnames_address)
+        return ue.dump_names(gnames, max_names=max_names)
+
+    def ue_dump_objects(self, gobjects_address: str,
+                        pid: int | None = None,
+                        process_name: str | None = None,
+                        gnames_address: str | None = None,
+                        max_objects: int = 200000,
+                        ue_version: str = 'ue5') -> dict:
+        """Read FUObjectArray and dump all UObject entries."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+
+        from engine_tools import UnrealEngine
+        ue = UnrealEngine(proc, ue_version=ue_version)
+        gobjects = parse_hex_address(gobjects_address)
+        gnames = parse_hex_address(gnames_address) if gnames_address else None
+        if gnames is not None:
+            ue.dump_names(gnames)
+        return ue.dump_objects(gobjects, max_objects=max_objects)
+
+    def ue_dump_sdk(self, gobjects_address: str,
+                    gnames_address: str,
+                    pid: int | None = None,
+                    process_name: str | None = None,
+                    output_file: str | None = None,
+                    max_classes: int = 5000,
+                    ue_version: str = 'ue5') -> dict:
+        """Generate C++ SDK headers from UE reflection system."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+
+        from engine_tools import UnrealEngine
+        ue = UnrealEngine(proc, ue_version=ue_version)
+        gnames = parse_hex_address(gnames_address)
+        gobjects = parse_hex_address(gobjects_address)
+        ue.dump_names(gnames)
+        ue.dump_objects(gobjects)
+        return ue.dump_sdk(gobjects, gnames, output_file=output_file,
+                           max_classes=max_classes)
+
+    def unity_il2cpp_dump(self, pid: int | None = None,
+                          process_name: str | None = None,
+                          output_file: str | None = None,
+                          max_classes: int = 5000) -> dict:
+        """Find and parse IL2CPP metadata from a running Unity process."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+
+        from engine_tools import IL2CPP
+        il2cpp = IL2CPP(proc)
+        return il2cpp.dump(output_file=output_file, max_classes=max_classes)
+
     # ==================== FPGA / Advanced ====================
 
     def benchmark(self, test_type: str = "read",
