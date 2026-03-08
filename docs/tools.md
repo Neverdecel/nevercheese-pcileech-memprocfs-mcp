@@ -1,6 +1,6 @@
 # Tool Reference
 
-Complete reference for all 15 MCP tools.
+Complete reference for all 28 MCP tools.
 
 ---
 
@@ -219,3 +219,118 @@ Read or write FPGA PCIe configuration space. FPGA only.
 | `output_file` | string | no | Save config space to file |
 
 **Returns:** config space hex dump (read) or write confirmation.
+
+---
+
+## Advanced RE Tools
+
+### scatter_read
+
+Batch-read multiple disjoint memory regions in a single DMA operation (~10x faster).
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `reads` | array | yes | List of `{address, size}` objects (max 1024) |
+| `pid` | integer | no | Process ID for virtual address mode |
+| `process_name` | string | no | Process name for virtual address mode |
+
+**Returns:** list of read results with address, size, and hex data.
+
+---
+
+### pe_sections
+
+Enumerate PE sections (.text, .rdata, .data, etc.) of a loaded module.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `module_name` | string | yes | Module to enumerate (e.g. `"game.exe"`) |
+| `pid` | integer | no | Process ID |
+| `process_name` | string | no | Process name |
+
+**Returns:** section name, virtual address, sizes, characteristics flags.
+
+---
+
+### signature_resolve
+
+Find a byte pattern and resolve the operand to a target address in one step.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `pattern` | string | yes | AOB pattern with `??` wildcards |
+| `pid` | integer | no | Process ID |
+| `process_name` | string | no | Process name |
+| `module` | string | no | Module to scan (recommended) |
+| `op_offset` | integer | no | Operand offset within match (default: 3) |
+| `op_length` | integer | no | Operand size: 1, 2, 4, or 8 (default: 4) |
+| `rip_relative` | boolean | no | Resolve as RIP-relative (default: true) |
+| `instruction_length` | integer | no | Instruction length (default: op_offset + op_length) |
+
+**Returns:** match address, operand value, resolved target address.
+
+---
+
+### rtti_scan
+
+Scan a module for MSVC C++ RTTI structures to discover classes, vtables, and inheritance.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `module` | string | yes | Module to scan (e.g. `"game.exe"`) |
+| `pid` | integer | no | Process ID |
+| `process_name` | string | no | Process name |
+| `max_classes` | integer | no | Maximum classes to return (default: 500) |
+
+**Returns:** class name, mangled name, TypeDescriptor address, vtable address, base classes.
+
+---
+
+### struct_analyze
+
+Heuristically analyze a memory region to identify data types at each offset.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `address` | string | yes | Start address in hex |
+| `size` | integer | no | Bytes to analyze (8-4096, default: 256) |
+| `pid` | integer | no | Process ID |
+| `process_name` | string | no | Process name |
+
+**Returns:** list of fields with offset, type (pointer/vtable_ptr/float/vec3/int32/null/unknown), and value.
+
+---
+
+### string_scan
+
+Scan process memory for ASCII and/or UTF-16LE strings.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `pid` | integer | no | Process ID |
+| `process_name` | string | no | Process name |
+| `module` | string | no | Module to scan (recommended for speed) |
+| `min_length` | integer | no | Minimum string length (default: 4) |
+| `encoding` | string | no | `"ascii"`, `"unicode"`, or `"both"` (default: `"both"`) |
+| `pattern` | string | no | Regex filter (e.g. `"Player\|Health"`) |
+| `max_results` | integer | no | Maximum results (default: 500) |
+
+**Returns:** list of strings with address, encoding, length, and content.
+
+---
+
+### memory_diff
+
+Snapshot and diff a memory region to detect changes (replaces CE scan workflow).
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `address` | string | yes | Start address in hex |
+| `size` | integer | yes | Region size in bytes (1-1MB) |
+| `label` | string | no | Snapshot label (default: `"default"`) |
+| `pid` | integer | no | Process ID |
+| `process_name` | string | no | Process name |
+
+First call takes a snapshot. Subsequent calls diff against the previous snapshot and report changes with type interpretations (int32, float, etc.).
+
+**Returns:** snapshot confirmation or diff results with changed bytes and interpretations.

@@ -3,7 +3,7 @@
 Linux-native MCP Server for PCILeech / MemProcFS.
 
 Uses memprocfs and leechcorepyc Python packages directly instead of
-wrapping the pcileech CLI. Provides 19+ MCP tools for DMA-based
+wrapping the pcileech CLI. Provides 28 MCP tools for DMA-based
 memory operations via the Model Context Protocol.
 """
 
@@ -571,6 +571,229 @@ async def list_tools() -> list[Tool]:
                 "required": [],
             },
         ),
+        # ==================== Advanced RE Tools ====================
+        Tool(
+            name="scatter_read",
+            description=(
+                "Batch-read multiple disjoint memory regions in a single DMA operation (~10x faster than "
+                "individual reads). Use this when you need to read many separate addresses at once, e.g. "
+                "reading multiple struct fields, entity list entries, or pointer chain values. "
+                "Each read is specified as {address, size}. Supports physical and virtual memory."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "reads": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "address": {"type": "string", "description": "Memory address in hex"},
+                                "size": {"type": "integer", "description": "Bytes to read (1 to 1MB)", "minimum": 1},
+                            },
+                            "required": ["address", "size"],
+                        },
+                        "description": "List of memory regions to read. Max 1024 entries.",
+                    },
+                    "pid": {"type": "integer", "description": "Process ID for virtual address reads."},
+                    "process_name": {"type": "string", "description": "Process name for virtual address reads."},
+                },
+                "required": ["reads"],
+            },
+        ),
+        Tool(
+            name="pe_sections",
+            description=(
+                "Enumerate PE sections (.text, .rdata, .data, .bss, etc.) of a loaded module. "
+                "Returns section name, virtual address, size, and flags (CODE, READ, WRITE, EXECUTE). "
+                "Essential prerequisite for RTTI scanning (needs .rdata), signature scanning (needs .text), "
+                "and string scanning (needs .data). Use module_list first to find module names."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pid": {"type": "integer", "description": "Process ID. Mutually exclusive with process_name."},
+                    "process_name": {"type": "string", "description": "Process name. Mutually exclusive with pid."},
+                    "module_name": {"type": "string", "description": "Module to enumerate sections from (e.g. 'game.exe')."},
+                },
+                "required": ["module_name"],
+            },
+        ),
+        Tool(
+            name="signature_resolve",
+            description=(
+                "Find a byte pattern and resolve the operand to a target address — all in one step. "
+                "This is the primary tool for finding game offsets from signatures. "
+                "Combines AOB scan + operand extraction + RIP-relative resolution. "
+                "Example: pattern '48 8B 05 ?? ?? ?? ??' with op_offset=3, op_length=4, instruction_length=7 "
+                "finds a 'mov rax,[rip+disp32]' and resolves the target address. "
+                "For non-RIP-relative patterns, set rip_relative=false to get the raw operand value."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "AOB pattern with ?? wildcards (e.g. '48 8B 05 ?? ?? ?? ??')",
+                    },
+                    "pid": {"type": "integer", "description": "Process ID. Mutually exclusive with process_name."},
+                    "process_name": {"type": "string", "description": "Process name. Mutually exclusive with pid."},
+                    "module": {
+                        "type": "string",
+                        "description": "Module to scan (e.g. 'game.exe'). Highly recommended for speed.",
+                    },
+                    "op_offset": {
+                        "type": "integer",
+                        "description": "Byte offset within the matched pattern where the operand starts. Default: 3 (common for RIP-relative instructions).",
+                        "default": 3,
+                    },
+                    "op_length": {
+                        "type": "integer", "enum": [1, 2, 4, 8],
+                        "description": "Size of the operand in bytes. Default: 4 (32-bit displacement).",
+                        "default": 4,
+                    },
+                    "rip_relative": {
+                        "type": "boolean",
+                        "description": "If true, resolve as RIP-relative: match_addr + instruction_length + operand. Default: true.",
+                        "default": True,
+                    },
+                    "instruction_length": {
+                        "type": "integer",
+                        "description": "Total instruction length for RIP-relative resolution. Default: op_offset + op_length.",
+                    },
+                },
+                "required": ["pattern"],
+            },
+        ),
+        Tool(
+            name="rtti_scan",
+            description=(
+                "Scan a module for MSVC C++ RTTI (Run-Time Type Information) to discover class names, "
+                "vtable addresses, and inheritance hierarchies — all externally via DMA. "
+                "This is one of the most powerful RE tools: it reveals the game's class hierarchy without "
+                "needing IDA or static analysis. Works with x64 MSVC-compiled binaries. "
+                "Returns: class name, demangled name, TypeDescriptor address, vtable address, base classes. "
+                "Use pe_sections first to verify the module has a .rdata section."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pid": {"type": "integer", "description": "Process ID. Mutually exclusive with process_name."},
+                    "process_name": {"type": "string", "description": "Process name. Mutually exclusive with pid."},
+                    "module": {
+                        "type": "string",
+                        "description": "Module to scan for RTTI (e.g. 'game.exe', 'client.dll'). Required.",
+                    },
+                    "max_classes": {
+                        "type": "integer",
+                        "description": "Maximum classes to return (default: 500). Large modules may have thousands.",
+                        "default": 500,
+                    },
+                },
+                "required": ["module"],
+            },
+        ),
+        Tool(
+            name="struct_analyze",
+            description=(
+                "Heuristically analyze a memory region to identify likely data types at each offset. "
+                "Reads memory and classifies each field as: pointer, vtable_ptr, float, vec2, vec3, "
+                "int32, null/padding, or unknown. Follows pointers to detect string targets and vtables. "
+                "This is like ReClass.NET but with AI interpretation — use it to reverse-engineer "
+                "game structs (player, entity, weapon, etc.) by reading their memory layout."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "address": {
+                        "type": "string",
+                        "description": "Start address of the struct/region to analyze, in hex.",
+                    },
+                    "size": {
+                        "type": "integer",
+                        "description": "Bytes to analyze (8-4096). Default: 256.",
+                        "default": 256, "minimum": 8, "maximum": 4096,
+                    },
+                    "pid": {"type": "integer", "description": "Process ID. Mutually exclusive with process_name."},
+                    "process_name": {"type": "string", "description": "Process name. Mutually exclusive with pid."},
+                },
+                "required": ["address"],
+            },
+        ),
+        Tool(
+            name="string_scan",
+            description=(
+                "Scan process memory for ASCII and/or UTF-16LE strings. "
+                "Use this to find debug strings, class names, config values, file paths, "
+                "and other readable text in game memory. Can scan a specific module or all process memory. "
+                "Supports regex filtering (e.g. pattern='Player|Entity' to find game-related strings)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pid": {"type": "integer", "description": "Process ID. Mutually exclusive with process_name."},
+                    "process_name": {"type": "string", "description": "Process name. Mutually exclusive with pid."},
+                    "module": {
+                        "type": "string",
+                        "description": "Restrict scan to this module (e.g. 'game.exe'). Much faster than full process scan.",
+                    },
+                    "min_length": {
+                        "type": "integer",
+                        "description": "Minimum string length to report. Default: 4.",
+                        "default": 4, "minimum": 3,
+                    },
+                    "encoding": {
+                        "type": "string", "enum": ["ascii", "unicode", "both"],
+                        "description": "'ascii' = 8-bit strings, 'unicode' = UTF-16LE, 'both' = scan for both. Default: 'both'.",
+                        "default": "both",
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regex to filter results (e.g. 'Player|Health|Ammo'). Case-insensitive.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum results to return. Default: 500.",
+                        "default": 500,
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="memory_diff",
+            description=(
+                "Snapshot and diff a memory region to detect changes. Replaces the manual Cheat Engine "
+                "'changed/unchanged value' scan workflow. "
+                "First call: takes a snapshot and returns immediately. "
+                "Second call (after a game action like taking damage, moving, etc.): diffs against the "
+                "snapshot and reports all changed bytes with type interpretations (int32, float, etc.). "
+                "Each subsequent call diffs against the previous snapshot. "
+                "Use the 'label' parameter to maintain multiple independent snapshots."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "address": {
+                        "type": "string",
+                        "description": "Start address of the region to snapshot/diff, in hex.",
+                    },
+                    "size": {
+                        "type": "integer",
+                        "description": "Size of the region in bytes (1-1MB).",
+                        "minimum": 1, "maximum": 1048576,
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Label for this snapshot group. Use different labels for different regions. Default: 'default'.",
+                        "default": "default",
+                    },
+                    "pid": {"type": "integer", "description": "Process ID for virtual address mode."},
+                    "process_name": {"type": "string", "description": "Process name for virtual address mode."},
+                },
+                "required": ["address", "size"],
+            },
+        ),
         # ==================== Advanced / FPGA ====================
         Tool(
             name="benchmark",
@@ -687,6 +910,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "module_imports": handle_module_imports,
             "pointer_read": handle_pointer_read,
             "process_regions": handle_process_regions,
+            "scatter_read": handle_scatter_read,
+            "pe_sections": handle_pe_sections,
+            "signature_resolve": handle_signature_resolve,
+            "rtti_scan": handle_rtti_scan,
+            "struct_analyze": handle_struct_analyze,
+            "string_scan": handle_string_scan,
+            "memory_diff": handle_memory_diff,
             "benchmark": handle_benchmark,
             "tlp_send": handle_tlp_send,
             "fpga_config": handle_fpga_config,
@@ -1134,6 +1364,242 @@ async def handle_process_regions(args: dict) -> list[TextContent]:
             f"{r['start']:>18}  {r['size_str']:>10}  {str(r['protection']):<16}  "
             f"{str(r['type']):<12}  {r.get('info', '')}"
         )
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_scatter_read(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+
+    mode = mode_string(pid, process_name)
+    w = get_wrapper()
+    results = await asyncio.to_thread(
+        w.scatter_read, args["reads"], pid=pid, process_name=process_name,
+    )
+
+    parts = [f"## Scatter Read Results ({mode})", "=" * 50, "",
+             f"Read {len(results)} region(s) in one batch:\n"]
+    for i, r in enumerate(results, 1):
+        parts.append(f"{i}. **{r['address']}** ({r['size']} bytes): `{r['data'][:64]}{'...' if len(r['data']) > 64 else ''}`")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_pe_sections(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    sections = await asyncio.to_thread(
+        w.pe_sections, pid=pid, process_name=process_name,
+        module_name=args["module_name"],
+    )
+
+    parts = [f"## PE Sections: {args['module_name']}", "=" * 50, "",
+             f"Found {len(sections)} section(s):\n"]
+    parts.append(f"{'Name':<12}  {'Virtual Address':>18}  {'VSize':>10}  {'RawSize':>10}  {'Flags'}")
+    parts.append("-" * 80)
+    for s in sections:
+        flags = ', '.join(s['flags'])
+        parts.append(
+            f"{s['name']:<12}  {s['virtual_address']:>18}  "
+            f"{s['virtual_size']:>10}  {s['raw_size']:>10}  {flags}"
+        )
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_signature_resolve(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    result = await asyncio.to_thread(
+        w.signature_resolve,
+        args["pattern"],
+        pid=pid, process_name=process_name,
+        module=args.get("module"),
+        op_offset=args.get("op_offset", 3),
+        op_length=args.get("op_length", 4),
+        rip_relative=args.get("rip_relative", True),
+        instruction_length=args.get("instruction_length"),
+    )
+
+    parts = ["## Signature Resolve Result", "=" * 50, "",
+             f"**Pattern:** `{result['pattern']}`", ""]
+
+    if result['success']:
+        parts.append(f"**Match address:** {result['match_address']}")
+        parts.append(f"**Operand value:** {result['operand']}")
+        parts.append(f"**Resolved address:** {result['resolved_address']}")
+        if result.get('instruction_length'):
+            parts.append(f"**Instruction length:** {result['instruction_length']}")
+    else:
+        parts.append(f"**Failed:** {result['error']}")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_rtti_scan(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    classes = await asyncio.to_thread(
+        w.rtti_scan,
+        pid=pid, process_name=process_name,
+        module=args["module"],
+        max_classes=args.get("max_classes", 500),
+    )
+
+    parts = [f"## RTTI Scan: {args['module']}", "=" * 50, "",
+             f"Found {len(classes)} class(es):\n"]
+
+    for i, c in enumerate(classes, 1):
+        line = f"{i}. **{c['class_name']}**"
+        if c.get('vtable'):
+            line += f"  vtable: {c['vtable']}"
+        if c.get('base_classes'):
+            line += f"  extends: {', '.join(c['base_classes'])}"
+        parts.append(line)
+        parts.append(f"   TD: {c['type_descriptor']}  mangled: `{c['mangled_name']}`")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_struct_analyze(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    result = await asyncio.to_thread(
+        w.struct_analyze,
+        args["address"],
+        size=args.get("size", 256),
+        pid=pid, process_name=process_name,
+    )
+
+    parts = [f"## Struct Analysis: {result['base_address']} ({result['size']} bytes)",
+             "=" * 50, ""]
+
+    for f in result['fields']:
+        line = f"  +{f['offset']:<8} [{f['type']:<12}] {f['value']}"
+        if f.get('target_string'):
+            line += f'  -> "{f["target_string"]}"'
+        parts.append(line)
+
+    if result.get('pointer_targets'):
+        parts.append(f"\n**Pointer targets:** {len(result['pointer_targets'])} resolved")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_string_scan(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    results = await asyncio.to_thread(
+        w.string_scan,
+        pid=pid, process_name=process_name,
+        module=args.get("module"),
+        min_length=args.get("min_length", 4),
+        encoding=args.get("encoding", "both"),
+        pattern=args.get("pattern"),
+        max_results=args.get("max_results", 500),
+    )
+
+    module_info = f" in {args['module']}" if args.get("module") else ""
+    parts = [f"## String Scan Results{module_info}", "=" * 50, "",
+             f"Found {len(results)} string(s):\n"]
+
+    for i, s in enumerate(results[:100], 1):  # Show first 100 in output
+        parts.append(f"{i}. [{s['encoding']}] **{s['address']}** ({s['length']} chars): `{s['string'][:80]}`")
+
+    if len(results) > 100:
+        parts.append(f"\n... and {len(results) - 100} more (truncated)")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_memory_diff(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+
+    w = get_wrapper()
+    result = await asyncio.to_thread(
+        w.memory_diff,
+        args["address"], args["size"],
+        label=args.get("label", "default"),
+        pid=pid, process_name=process_name,
+    )
+
+    parts = ["## Memory Diff Result", "=" * 50, ""]
+
+    if result['action'] == 'snapshot_taken':
+        parts.append(f"**Snapshot taken:** {result['label']}")
+        parts.append(f"**Address:** {result['address']} ({result['size']} bytes)")
+        parts.append(f"\n{result['message']}")
+    else:
+        parts.append(f"**Label:** {result['label']}")
+        parts.append(f"**Region:** {result['address']} ({result['size']} bytes)")
+        parts.append(f"**Changes:** {result['total_changes']} region(s), {result['bytes_changed']} byte(s)\n")
+
+        if not result['changes']:
+            parts.append("No changes detected.")
+        else:
+            for i, c in enumerate(result['changes'][:50], 1):
+                parts.append(f"{i}. **{c['address']}** (+{c['offset']}, {c['size']}B): `{c['old']}` -> `{c['new']}`")
+                if c.get('as_int32'):
+                    parts.append(f"   int32: {c['as_int32']}")
+                if c.get('as_float'):
+                    parts.append(f"   float: {c['as_float']}")
+                if c.get('as_int64'):
+                    parts.append(f"   int64: {c['as_int64']}")
+                if c.get('as_byte'):
+                    parts.append(f"   byte: {c['as_byte']}")
+
+            if len(result['changes']) > 50:
+                parts.append(f"\n... and {len(result['changes']) - 50} more changes (truncated)")
 
     return [TextContent(type="text", text="\n".join(parts))]
 

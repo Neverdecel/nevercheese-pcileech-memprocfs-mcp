@@ -20,15 +20,16 @@ This MCP server lets an AI assistant perform DMA-based memory operations on a ta
 
 ## Tools
 
-21 MCP tools organized by capability:
+28 MCP tools organized by capability:
 
 | Category | Tools |
 |---|---|
-| **Core Memory** | `memory_read`, `memory_write`, `memory_format` |
+| **Core Memory** | `memory_read`, `memory_write`, `memory_format`, `scatter_read` |
 | **System** | `system_info`, `memory_probe`, `memory_dump`, `memory_search`, `memory_patch`\*, `process_list` |
 | **Address Translation** | `translate_virt2phys`, `process_virt2phys` |
-| **Modules** | `module_list`, `module_dump`, `module_exports`, `module_imports` |
-| **Game / RE** | `aob_scan`, `pointer_read`, `process_regions` |
+| **Modules** | `module_list`, `module_dump`, `module_exports`, `module_imports`, `pe_sections` |
+| **Game / RE** | `aob_scan`, `signature_resolve`, `pointer_read`, `process_regions` |
+| **Advanced RE** | `rtti_scan`, `struct_analyze`, `string_scan`, `memory_diff` |
 | **Advanced / FPGA** | `benchmark`, `tlp_send`, `fpga_config` |
 
 \* `memory_patch` is stubbed — `.sig` files are a CLI-only feature. Use `memory_search` + `memory_write` instead.

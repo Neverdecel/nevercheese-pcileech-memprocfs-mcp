@@ -6,6 +6,7 @@ instead of shelling out to pcileech.exe.
 """
 
 import json
+import math
 import os
 import re
 import time
@@ -124,6 +125,7 @@ class VmmWrapper:
 
         self._vmm = None
         self._lc = None
+        self._snapshots = {}
 
     def _get_vmm(self):
         """Lazily initialize the memprocfs Vmm instance."""
@@ -238,6 +240,48 @@ class VmmWrapper:
             raise MemoryAccessError(f"Memory write failed at 0x{addr_int:x}: {e}")
 
         return True
+
+    def scatter_read(self, reads: list[dict],
+                     pid: int | None = None,
+                     process_name: str | None = None) -> list[dict]:
+        """Batch-read multiple disjoint memory regions in a single scatter operation (~10x faster)."""
+        if not reads:
+            raise PCILeechError("reads list cannot be empty")
+        if len(reads) > 1024:
+            raise PCILeechError("Maximum 1024 reads per scatter call")
+
+        proc = self._resolve_process(pid, process_name)
+        import memprocfs
+
+        if proc is not None:
+            scatter = proc.memory.scatter_initialize(memprocfs.FLAG_ZEROPAD_ON_FAIL)
+        else:
+            vmm = self._get_vmm()
+            scatter = vmm.memory.scatter_initialize(memprocfs.FLAG_ZEROPAD_ON_FAIL)
+
+        try:
+            parsed = []
+            for entry in reads:
+                addr = parse_hex_address(entry['address'])
+                size = entry['size']
+                if size < 1 or size > 1048576:
+                    raise PCILeechError(f"Read size must be 1-1MB, got {size}")
+                parsed.append((addr, size))
+
+            scatter.prepare([[addr, size] for addr, size in parsed])
+            scatter.execute()
+
+            results = []
+            for addr, size in parsed:
+                data = scatter.read(addr, size)
+                results.append({
+                    'address': f'0x{addr:x}',
+                    'size': len(data),
+                    'data': data.hex(),
+                })
+            return results
+        finally:
+            scatter.close()
 
     # ==================== System ====================
 
@@ -519,6 +563,70 @@ class VmmWrapper:
 
         return modules
 
+    def pe_sections(self, pid: int | None = None,
+                    process_name: str | None = None,
+                    module_name: str = "") -> list[dict]:
+        """Enumerate PE sections (.text, .rdata, .data, etc.) with addresses and flags."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+        if not module_name:
+            raise PCILeechError("module_name is required")
+
+        try:
+            mod = proc.module(module_name)
+        except Exception as e:
+            raise PCILeechError(f"Module '{module_name}' not found: {e}")
+
+        import memprocfs
+        base = mod.base
+
+        dos_header = proc.memory.read(base, 64, memprocfs.FLAG_ZEROPAD_ON_FAIL)
+        if dos_header[:2] != b'MZ':
+            raise PCILeechError(f"Invalid PE: no MZ signature at 0x{base:x}")
+
+        e_lfanew = struct.unpack_from('<I', dos_header, 0x3C)[0]
+        pe_header = proc.memory.read(base + e_lfanew, 264, memprocfs.FLAG_ZEROPAD_ON_FAIL)
+        if pe_header[:4] != b'PE\x00\x00':
+            raise PCILeechError("Invalid PE: no PE signature")
+
+        num_sections = struct.unpack_from('<H', pe_header, 6)[0]
+        size_of_optional = struct.unpack_from('<H', pe_header, 20)[0]
+
+        section_offset = base + e_lfanew + 4 + 20 + size_of_optional
+        section_data = proc.memory.read(section_offset, num_sections * 40,
+                                        memprocfs.FLAG_ZEROPAD_ON_FAIL)
+
+        _SCN_FLAGS = [
+            (0x00000020, 'CODE'), (0x00000040, 'INITIALIZED_DATA'),
+            (0x00000080, 'UNINITIALIZED_DATA'), (0x20000000, 'EXECUTE'),
+            (0x40000000, 'READ'), (0x80000000, 'WRITE'),
+            (0x02000000, 'DISCARDABLE'),
+        ]
+
+        sections = []
+        for i in range(num_sections):
+            off = i * 40
+            name = section_data[off:off + 8].split(b'\x00')[0].decode('ascii', errors='replace')
+            virtual_size = struct.unpack_from('<I', section_data, off + 8)[0]
+            rva = struct.unpack_from('<I', section_data, off + 12)[0]
+            raw_size = struct.unpack_from('<I', section_data, off + 16)[0]
+            characteristics = struct.unpack_from('<I', section_data, off + 36)[0]
+
+            flags = [label for mask, label in _SCN_FLAGS if characteristics & mask]
+
+            sections.append({
+                'name': name,
+                'virtual_address': f'0x{base + rva:x}',
+                'virtual_size': virtual_size,
+                'raw_size': raw_size,
+                'characteristics': f'0x{characteristics:08x}',
+                'flags': flags,
+                'rva': f'0x{rva:x}',
+            })
+
+        return sections
+
     # ==================== Game / RE Tools ====================
 
     def aob_scan(self, pattern: str, pid: int | None = None,
@@ -783,6 +891,582 @@ class VmmWrapper:
             raise PCILeechError(f"Failed to enumerate regions: {e}")
 
         return regions
+
+    # ==================== Advanced RE Tools ====================
+
+    @staticmethod
+    def _demangle_msvc(mangled: str) -> str:
+        """Demangle MSVC RTTI name: '.?AVFoo@Bar@@' -> 'Bar::Foo'."""
+        clean = mangled
+        if clean.startswith('.?AV') or clean.startswith('.?AU'):
+            clean = clean[4:]
+        if clean.endswith('@@'):
+            clean = clean[:-2]
+        parts = [p for p in clean.split('@') if p]
+        return '::'.join(reversed(parts)) if len(parts) > 1 else (parts[0] if parts else mangled)
+
+    def signature_resolve(self, pattern: str,
+                          pid: int | None = None,
+                          process_name: str | None = None,
+                          module: str | None = None,
+                          op_offset: int = 3,
+                          op_length: int = 4,
+                          rip_relative: bool = True,
+                          instruction_length: int | None = None) -> dict:
+        """
+        AOB scan + operand extraction + address resolution in one step.
+
+        Finds pattern, extracts the operand at op_offset, and resolves:
+        - RIP-relative: match_addr + instruction_length + signed_operand
+        - Absolute: raw operand value
+
+        Example: '48 8B 05 ?? ?? ?? ??' with op_offset=3, op_length=4,
+        instruction_length=7 resolves a mov rax,[rip+disp32] target.
+        """
+        matches = self.aob_scan(pattern, pid=pid, process_name=process_name,
+                                module=module, find_all=False)
+        if not matches:
+            return {
+                'success': False, 'error': 'Pattern not found',
+                'pattern': pattern, 'resolved_address': None,
+            }
+
+        match = matches[0]
+        match_addr = parse_hex_address(match['address'])
+        context = bytes.fromhex(match['context'])
+
+        # Read more data if context is too short
+        if op_offset + op_length > len(context):
+            proc = self._resolve_process(pid, process_name)
+            import memprocfs
+            context = proc.memory.read(match_addr, op_offset + op_length,
+                                       memprocfs.FLAG_ZEROPAD_ON_FAIL)
+
+        fmt = {1: '<b', 2: '<h', 4: '<i', 8: '<q'}.get(op_length)
+        if fmt is None:
+            raise PCILeechError(f"Unsupported op_length: {op_length}. Use 1, 2, 4, or 8.")
+        operand = struct.unpack_from(fmt, context, op_offset)[0]
+
+        if rip_relative:
+            inst_len = instruction_length if instruction_length is not None else (op_offset + op_length)
+            resolved = (match_addr + inst_len + operand) & _U64_MAX
+        else:
+            resolved = operand & _U64_MAX
+
+        return {
+            'success': True, 'error': None, 'pattern': pattern,
+            'match_address': f'0x{match_addr:x}',
+            'operand': operand,
+            'resolved_address': f'0x{resolved:x}',
+            'instruction_length': inst_len if rip_relative else None,
+        }
+
+    def rtti_scan(self, pid: int | None = None,
+                  process_name: str | None = None,
+                  module: str | None = None,
+                  max_classes: int = 500) -> list[dict]:
+        """
+        Scan for MSVC x64 RTTI structures in a module.
+
+        Finds TypeDescriptors (.?AV/.?AU markers), resolves CompleteObjectLocators,
+        ClassHierarchyDescriptors, and vtable addresses. Returns class names,
+        inheritance hierarchies, and vtable locations.
+        """
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+        if not module:
+            raise PCILeechError("module name is required for RTTI scan")
+
+        try:
+            mod = proc.module(module)
+        except Exception as e:
+            raise PCILeechError(f"Module '{module}' not found: {e}")
+
+        import memprocfs
+        base = mod.base
+
+        # Read entire module image
+        module_data = proc.memory.read(base, mod.image_size,
+                                       memprocfs.FLAG_ZEROPAD_ON_FAIL)
+
+        # Get code ranges for vtable validation
+        sections = self.pe_sections(pid=pid, process_name=process_name,
+                                    module_name=module)
+        code_ranges = []
+        for sec in sections:
+            if 'EXECUTE' in sec['flags']:
+                rva = int(sec['rva'], 16)
+                code_ranges.append((base + rva, base + rva + sec['virtual_size']))
+
+        def is_code_addr(addr):
+            return any(s <= addr < e for s, e in code_ranges)
+
+        def read_at_rva(rva, size):
+            if 0 <= rva < len(module_data) - size:
+                return module_data[rva:rva + size]
+            return None
+
+        classes = []
+        for marker in (b'.?AV', b'.?AU'):
+            offset = 0
+            while offset < len(module_data) and len(classes) < max_classes:
+                idx = module_data.find(marker, offset)
+                if idx == -1:
+                    break
+
+                name_end = module_data.find(b'\x00', idx)
+                if name_end == -1 or name_end - idx > 512:
+                    offset = idx + 1
+                    continue
+
+                mangled = module_data[idx:name_end].decode('ascii', errors='replace')
+
+                # TypeDescriptor (x64): [pVFTable:8][spare:8][name:var]
+                # name starts at offset 16
+                td_rva = idx - 16
+                if td_rva < 0:
+                    offset = idx + 1
+                    continue
+
+                # Validate pVFTable is non-zero
+                pvft = struct.unpack_from('<Q', module_data, td_rva)[0]
+                if pvft == 0:
+                    offset = idx + 1
+                    continue
+
+                clean_name = self._demangle_msvc(mangled)
+                entry = {
+                    'class_name': clean_name,
+                    'mangled_name': mangled,
+                    'type_descriptor': f'0x{base + td_rva:x}',
+                }
+
+                # Find COL referencing this TypeDescriptor
+                # COL+12 = pTypeDescriptor (4-byte RVA from module base)
+                td_rva_bytes = struct.pack('<I', td_rva & 0xFFFFFFFF)
+
+                col_search = 0
+                while col_search < len(module_data):
+                    col_ref = module_data.find(td_rva_bytes, col_search)
+                    if col_ref == -1:
+                        break
+
+                    col_start = col_ref - 12
+                    if col_start < 0 or col_start + 24 > len(module_data):
+                        col_search = col_ref + 1
+                        continue
+
+                    # COL signature must be 1 (x64)
+                    sig = struct.unpack_from('<I', module_data, col_start)[0]
+                    if sig != 1:
+                        col_search = col_ref + 1
+                        continue
+
+                    # Validate pSelf (COL+20) matches this COL's RVA
+                    p_self = struct.unpack_from('<I', module_data, col_start + 20)[0]
+                    if p_self != col_start & 0xFFFFFFFF:
+                        col_search = col_ref + 1
+                        continue
+
+                    entry['col'] = f'0x{base + col_start:x}'
+
+                    # Read ClassHierarchyDescriptor for inheritance
+                    chd_rva = struct.unpack_from('<I', module_data, col_start + 16)[0]
+                    chd_data = read_at_rva(chd_rva, 16)
+                    if chd_data:
+                        num_bases = struct.unpack_from('<I', chd_data, 8)[0]
+                        bca_rva = struct.unpack_from('<I', chd_data, 12)[0]
+
+                        base_classes = []
+                        if num_bases <= 64:
+                            for bi in range(min(num_bases, 32)):
+                                bcd_rva_data = read_at_rva(bca_rva + bi * 4, 4)
+                                if not bcd_rva_data:
+                                    break
+                                bcd_rva = struct.unpack_from('<I', bcd_rva_data, 0)[0]
+                                bcd = read_at_rva(bcd_rva, 28)
+                                if not bcd:
+                                    continue
+                                bc_td_rva = struct.unpack_from('<I', bcd, 0)[0]
+                                bc_name_data = read_at_rva(bc_td_rva + 16, 256)
+                                if not bc_name_data:
+                                    continue
+                                bc_end = bc_name_data.find(b'\x00')
+                                if bc_end == -1:
+                                    continue
+                                bc_mangled = bc_name_data[:bc_end].decode('ascii', errors='replace')
+                                bc_clean = self._demangle_msvc(bc_mangled)
+                                if bc_clean != clean_name:
+                                    base_classes.append(bc_clean)
+
+                        if base_classes:
+                            entry['base_classes'] = base_classes
+
+                    # Find vtable: scan for pointer to COL (vtable[-1])
+                    col_va = base + col_start
+                    col_va_bytes = struct.pack('<Q', col_va)
+                    vt_search = 0
+                    while vt_search < len(module_data) - 8:
+                        vt_ref = module_data.find(col_va_bytes, vt_search)
+                        if vt_ref == -1:
+                            break
+                        # vtable starts at vt_ref + 8
+                        if vt_ref + 16 <= len(module_data):
+                            first_func = struct.unpack_from('<Q', module_data, vt_ref + 8)[0]
+                            if is_code_addr(first_func):
+                                entry['vtable'] = f'0x{base + vt_ref + 8:x}'
+                                break
+                        vt_search = vt_ref + 1
+
+                    break
+                    col_search = col_ref + 1
+
+                classes.append(entry)
+                offset = idx + 1
+
+        return classes
+
+    def struct_analyze(self, address: str, size: int = 256,
+                       pid: int | None = None,
+                       process_name: str | None = None) -> dict:
+        """
+        Heuristic analysis of a memory region to identify likely data types.
+
+        Identifies pointers, vtable pointers, floats, vectors, integers,
+        strings, and null/padding at each offset. Follows pointers to
+        detect string targets and vtables.
+        """
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+
+        addr = parse_hex_address(address)
+        if size < 8 or size > 4096:
+            raise PCILeechError("size must be 8-4096 bytes")
+
+        import memprocfs
+        data = proc.memory.read(addr, size, memprocfs.FLAG_ZEROPAD_ON_FAIL)
+
+        # Build valid address ranges for pointer detection
+        try:
+            valid_ranges = []
+            for vad in proc.maps.vad():
+                start = vad.get('start', vad.get('va', 0))
+                end = start + vad.get('size', vad.get('cb', 0))
+                valid_ranges.append((start, end))
+        except Exception:
+            valid_ranges = []
+
+        def is_valid_ptr(val):
+            if val == 0 or val > 0x7FFFFFFFFFFF:
+                return False
+            if valid_ranges:
+                return any(s <= val < e for s, e in valid_ranges)
+            return 0x10000 <= val <= 0x7FFFFFFFFFFF
+
+        def is_reasonable_float(val):
+            if val == 0.0 or math.isnan(val) or math.isinf(val):
+                return False
+            return -1e6 <= val <= 1e6 and abs(val) > 1e-10
+
+        fields = []
+        pointer_targets = {}
+        offset = 0
+
+        while offset < len(data):
+            remaining = len(data) - offset
+
+            if remaining < 4:
+                fields.append({
+                    'offset': f'0x{offset:x}', 'size': remaining,
+                    'type': 'bytes', 'value': data[offset:].hex(),
+                })
+                break
+
+            if remaining >= 8:
+                val_u64 = struct.unpack_from('<Q', data, offset)[0]
+
+                # NULL / padding
+                if val_u64 == 0:
+                    fields.append({
+                        'offset': f'0x{offset:x}', 'size': 8,
+                        'type': 'null', 'value': '0x0',
+                    })
+                    offset += 8
+                    continue
+
+                # Pointer detection
+                if is_valid_ptr(val_u64):
+                    field = {
+                        'offset': f'0x{offset:x}', 'size': 8,
+                        'type': 'pointer', 'value': f'0x{val_u64:x}',
+                    }
+                    try:
+                        target = proc.memory.read(val_u64, 32, memprocfs.FLAG_ZEROPAD_ON_FAIL)
+                        # Vtable check (first field, pointer to code pointers)
+                        first_ptr = struct.unpack_from('<Q', target, 0)[0]
+                        if offset == 0 and is_valid_ptr(first_ptr):
+                            field['type'] = 'vtable_ptr'
+                        # String check
+                        try:
+                            s = target.split(b'\x00')[0].decode('ascii')
+                            if len(s) >= 4 and all(32 <= ord(c) < 127 for c in s):
+                                field['target_string'] = s
+                        except (UnicodeDecodeError, ValueError):
+                            pass
+                        pointer_targets[f'0x{val_u64:x}'] = target.hex()[:64]
+                    except Exception:
+                        pass
+                    fields.append(field)
+                    offset += 8
+                    continue
+
+            # Float / vector detection (4-byte aligned)
+            val_f32 = struct.unpack_from('<f', data, offset)[0]
+            if is_reasonable_float(val_f32):
+                # Check for vec3
+                if remaining >= 12:
+                    f2 = struct.unpack_from('<f', data, offset + 4)[0]
+                    f3 = struct.unpack_from('<f', data, offset + 8)[0]
+                    if is_reasonable_float(f2) and is_reasonable_float(f3):
+                        fields.append({
+                            'offset': f'0x{offset:x}', 'size': 12, 'type': 'vec3',
+                            'value': f'({val_f32:.4f}, {f2:.4f}, {f3:.4f})',
+                        })
+                        offset += 12
+                        continue
+                # Check for vec2
+                if remaining >= 8:
+                    f2 = struct.unpack_from('<f', data, offset + 4)[0]
+                    if is_reasonable_float(f2):
+                        fields.append({
+                            'offset': f'0x{offset:x}', 'size': 8, 'type': 'vec2',
+                            'value': f'({val_f32:.4f}, {f2:.4f})',
+                        })
+                        offset += 8
+                        continue
+                fields.append({
+                    'offset': f'0x{offset:x}', 'size': 4, 'type': 'float',
+                    'value': f'{val_f32:.6f}',
+                })
+                offset += 4
+                continue
+
+            # Small integer detection
+            val_u32 = struct.unpack_from('<I', data, offset)[0]
+            if remaining >= 8:
+                high = struct.unpack_from('<I', data, offset + 4)[0]
+            else:
+                high = 1  # force 4-byte path
+            if 0 < val_u32 <= 10000 and high == 0 and remaining >= 8:
+                fields.append({
+                    'offset': f'0x{offset:x}', 'size': 4, 'type': 'int32',
+                    'value': str(val_u32),
+                })
+                offset += 4
+                continue
+
+            # Unknown
+            step = 8 if remaining >= 8 else 4
+            raw = struct.unpack_from('<Q' if step == 8 else '<I', data, offset)[0]
+            fields.append({
+                'offset': f'0x{offset:x}', 'size': step, 'type': 'unknown',
+                'value': f'0x{raw:0{step * 2}x}',
+            })
+            offset += step
+
+        return {
+            'base_address': f'0x{addr:x}',
+            'size': size,
+            'fields': fields,
+            'pointer_targets': pointer_targets,
+        }
+
+    def string_scan(self, pid: int | None = None,
+                    process_name: str | None = None,
+                    module: str | None = None,
+                    min_length: int = 4,
+                    encoding: str = "both",
+                    pattern: str | None = None,
+                    max_results: int = 500) -> list[dict]:
+        """Scan process memory for ASCII and/or UTF-16LE strings."""
+        proc = self._resolve_process(pid, process_name)
+        if proc is None:
+            raise PCILeechError("pid or process_name is required")
+        if min_length < 3:
+            raise PCILeechError("min_length must be >= 3")
+        if encoding not in ("ascii", "unicode", "both"):
+            raise PCILeechError("encoding must be 'ascii', 'unicode', or 'both'")
+
+        import memprocfs
+
+        ranges = []
+        if module:
+            try:
+                mod = proc.module(module)
+                ranges.append((mod.base, mod.image_size))
+            except Exception as e:
+                raise PCILeechError(f"Module '{module}' not found: {e}")
+        else:
+            try:
+                for vad in proc.maps.vad():
+                    start = vad.get('start', vad.get('va', 0))
+                    size = vad.get('size', vad.get('cb', 0))
+                    if 0 < size <= 64 * 1024 * 1024:
+                        ranges.append((start, size))
+            except Exception:
+                raise PCILeechError("Failed to enumerate process memory regions")
+
+        compiled = re.compile(pattern, re.IGNORECASE) if pattern else None
+        results = []
+
+        for base_addr, region_size in ranges:
+            if len(results) >= max_results:
+                break
+            try:
+                data = proc.memory.read(base_addr, region_size,
+                                        memprocfs.FLAG_ZEROPAD_ON_FAIL)
+            except Exception:
+                continue
+
+            if encoding in ("ascii", "both"):
+                i = 0
+                while i < len(data) and len(results) < max_results:
+                    if 32 <= data[i] < 127:
+                        start = i
+                        while i < len(data) and 32 <= data[i] < 127:
+                            i += 1
+                        if i - start >= min_length:
+                            s = data[start:i].decode('ascii')
+                            if compiled is None or compiled.search(s):
+                                results.append({
+                                    'address': f'0x{base_addr + start:x}',
+                                    'encoding': 'ascii',
+                                    'length': i - start,
+                                    'string': s[:256],
+                                })
+                    else:
+                        i += 1
+
+            if encoding in ("unicode", "both"):
+                i = 0
+                while i < len(data) - 1 and len(results) < max_results:
+                    char = struct.unpack_from('<H', data, i)[0]
+                    if 32 <= char < 127:
+                        start = i
+                        chars = []
+                        while i < len(data) - 1:
+                            char = struct.unpack_from('<H', data, i)[0]
+                            if 32 <= char < 127:
+                                chars.append(chr(char))
+                                i += 2
+                            else:
+                                break
+                        if len(chars) >= min_length:
+                            s = ''.join(chars)
+                            if compiled is None or compiled.search(s):
+                                results.append({
+                                    'address': f'0x{base_addr + start:x}',
+                                    'encoding': 'utf-16le',
+                                    'length': len(chars),
+                                    'string': s[:256],
+                                })
+                    else:
+                        i += 2
+
+        return results
+
+    def memory_snapshot(self, label: str, address: str, size: int,
+                        pid: int | None = None,
+                        process_name: str | None = None) -> dict:
+        """Take a named snapshot of a memory region for later diffing."""
+        data = self.read_memory(address, size, pid=pid, process_name=process_name)
+        addr_int = parse_hex_address(address)
+
+        self._snapshots[label] = {
+            'address': addr_int, 'size': size, 'data': data,
+            'pid': pid, 'process_name': process_name,
+            'timestamp': time.time(),
+        }
+        return {
+            'label': label, 'address': f'0x{addr_int:x}',
+            'size': size, 'timestamp': self._snapshots[label]['timestamp'],
+        }
+
+    def memory_diff(self, address: str, size: int,
+                    label: str = "default",
+                    pid: int | None = None,
+                    process_name: str | None = None) -> dict:
+        """
+        Compare current memory against a stored snapshot.
+
+        First call takes a snapshot; subsequent calls diff against it and
+        report changed bytes with type interpretations (int, float, etc.).
+        """
+        addr_int = parse_hex_address(address)
+
+        if label not in self._snapshots:
+            self.memory_snapshot(label, address, size, pid=pid, process_name=process_name)
+            return {
+                'action': 'snapshot_taken', 'label': label,
+                'address': f'0x{addr_int:x}', 'size': size,
+                'message': f'Initial snapshot "{label}" taken. Call again after a game action to see changes.',
+            }
+
+        old_data = self._snapshots[label]['data']
+        current_data = self.read_memory(address, size, pid=pid, process_name=process_name)
+
+        changes = []
+        i = 0
+        limit = min(len(old_data), len(current_data))
+        while i < limit:
+            if old_data[i] != current_data[i]:
+                start = i
+                while i < limit and old_data[i] != current_data[i]:
+                    i += 1
+                old_bytes = old_data[start:i]
+                new_bytes = current_data[start:i]
+                change = {
+                    'offset': f'0x{start:x}',
+                    'address': f'0x{addr_int + start:x}',
+                    'size': i - start,
+                    'old': old_bytes.hex(),
+                    'new': new_bytes.hex(),
+                }
+                n = i - start
+                if n == 4:
+                    oi = struct.unpack_from('<i', old_bytes, 0)[0]
+                    ni = struct.unpack_from('<i', new_bytes, 0)[0]
+                    change['as_int32'] = f'{oi} -> {ni} (delta: {ni - oi})'
+                    of = struct.unpack_from('<f', old_bytes, 0)[0]
+                    nf = struct.unpack_from('<f', new_bytes, 0)[0]
+                    if not (math.isnan(of) or math.isinf(of) or math.isnan(nf) or math.isinf(nf)):
+                        change['as_float'] = f'{of:.4f} -> {nf:.4f}'
+                elif n == 8:
+                    oi = struct.unpack_from('<q', old_bytes, 0)[0]
+                    ni = struct.unpack_from('<q', new_bytes, 0)[0]
+                    change['as_int64'] = f'{oi} -> {ni}'
+                elif n == 1:
+                    change['as_byte'] = f'{old_bytes[0]} -> {new_bytes[0]}'
+                changes.append(change)
+            else:
+                i += 1
+
+        # Update snapshot for next diff
+        self._snapshots[label] = {
+            'address': addr_int, 'size': size, 'data': current_data,
+            'pid': pid, 'process_name': process_name,
+            'timestamp': time.time(),
+        }
+
+        return {
+            'action': 'diff', 'label': label,
+            'address': f'0x{addr_int:x}', 'size': size,
+            'total_changes': len(changes),
+            'bytes_changed': sum(c['size'] for c in changes),
+            'changes': changes,
+        }
 
     # ==================== FPGA / Advanced ====================
 
