@@ -74,7 +74,7 @@ def test_mcp_tools():
     from main import server, list_tools
 
     tools = asyncio.run(list_tools())
-    check(f"tool count is 21", len(tools) == 21)
+    check(f"tool count is 28", len(tools) == 28)
 
     expected_names = {
         "memory_read", "memory_write", "memory_format",
@@ -84,6 +84,8 @@ def test_mcp_tools():
         "module_list", "aob_scan", "module_dump",
         "module_exports", "module_imports", "pointer_read",
         "process_regions", "benchmark", "tlp_send", "fpga_config",
+        "scatter_read", "pe_sections", "signature_resolve",
+        "rtti_scan", "struct_analyze", "string_scan", "memory_diff",
     }
     actual_names = {t.name for t in tools}
     check("all expected tools present", actual_names == expected_names)
@@ -392,6 +394,189 @@ def test_mock_process_regions():
     check("shows game.exe", "game.exe" in text)
 
 
+def test_mock_pe_sections():
+    print("\n--- Mock PE Sections ---")
+    from main import handle_pe_sections
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.pe_sections.return_value = [
+        {'name': '.text', 'virtual_address': '0x7ff6a001000', 'virtual_size': 0x100000,
+         'raw_size': 0x100000, 'characteristics': '0x60000020', 'flags': ['CODE', 'EXECUTE', 'READ'], 'rva': '0x1000'},
+        {'name': '.rdata', 'virtual_address': '0x7ff6a101000', 'virtual_size': 0x50000,
+         'raw_size': 0x50000, 'characteristics': '0x40000040', 'flags': ['INITIALIZED_DATA', 'READ'], 'rva': '0x101000'},
+        {'name': '.data', 'virtual_address': '0x7ff6a151000', 'virtual_size': 0x20000,
+         'raw_size': 0x10000, 'characteristics': '0xc0000040', 'flags': ['INITIALIZED_DATA', 'READ', 'WRITE'], 'rva': '0x151000'},
+    ]
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_pe_sections({
+            "module_name": "game.exe", "pid": 1234,
+        }))
+
+    text = result[0].text
+    check("shows section count", "3 section" in text)
+    check("shows .text", ".text" in text)
+    check("shows .rdata", ".rdata" in text)
+    check("shows EXECUTE flag", "EXECUTE" in text)
+
+
+def test_mock_signature_resolve():
+    print("\n--- Mock Signature Resolve ---")
+    from main import handle_signature_resolve
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.signature_resolve.return_value = {
+        'success': True, 'error': None,
+        'pattern': '48 8B 05 ?? ?? ?? ??',
+        'match_address': '0x7ff6a012345',
+        'operand': 0x1234,
+        'resolved_address': '0x7ff6a013580',
+        'instruction_length': 7,
+    }
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_signature_resolve({
+            "pattern": "48 8B 05 ?? ?? ?? ??",
+            "pid": 1234, "module": "game.exe",
+        }))
+
+    text = result[0].text
+    check("shows resolved address", "0x7ff6a013580" in text)
+    check("shows match address", "0x7ff6a012345" in text)
+    check("shows pattern", "48 8B 05" in text)
+
+
+def test_mock_rtti_scan():
+    print("\n--- Mock RTTI Scan ---")
+    from main import handle_rtti_scan
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.rtti_scan.return_value = [
+        {'class_name': 'CPlayer', 'mangled_name': '.?AVCPlayer@@',
+         'type_descriptor': '0x7ff6a200000', 'vtable': '0x7ff6a100000',
+         'base_classes': ['CEntity', 'CBaseObject']},
+        {'class_name': 'CEntity', 'mangled_name': '.?AVCEntity@@',
+         'type_descriptor': '0x7ff6a200100'},
+    ]
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_rtti_scan({
+            "module": "game.exe", "pid": 1234,
+        }))
+
+    text = result[0].text
+    check("shows class count", "2 class" in text)
+    check("shows CPlayer", "CPlayer" in text)
+    check("shows vtable", "vtable:" in text)
+    check("shows inheritance", "CEntity" in text)
+
+
+def test_mock_struct_analyze():
+    print("\n--- Mock Struct Analyze ---")
+    from main import handle_struct_analyze
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.struct_analyze.return_value = {
+        'base_address': '0x1a000000',
+        'size': 64,
+        'fields': [
+            {'offset': '0x0', 'size': 8, 'type': 'vtable_ptr', 'value': '0x7ff6a100000'},
+            {'offset': '0x8', 'size': 8, 'type': 'null', 'value': '0x0'},
+            {'offset': '0x10', 'size': 12, 'type': 'vec3', 'value': '(100.5000, 200.3000, 50.1000)'},
+            {'offset': '0x1c', 'size': 4, 'type': 'int32', 'value': '100'},
+        ],
+        'pointer_targets': {'0x7ff6a100000': 'deadbeef' * 4},
+    }
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_struct_analyze({
+            "address": "0x1a000000", "size": 64, "pid": 1234,
+        }))
+
+    text = result[0].text
+    check("shows vtable_ptr", "vtable_ptr" in text)
+    check("shows vec3", "vec3" in text)
+    check("shows int32", "int32" in text)
+    check("shows position values", "100.5000" in text)
+
+
+def test_mock_string_scan():
+    print("\n--- Mock String Scan ---")
+    from main import handle_string_scan
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.string_scan.return_value = [
+        {'address': '0x7ff6a200000', 'encoding': 'ascii', 'length': 12, 'string': 'CPlayerClass'},
+        {'address': '0x7ff6a200100', 'encoding': 'utf-16le', 'length': 8, 'string': 'GameName'},
+    ]
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_string_scan({
+            "pid": 1234, "module": "game.exe",
+            "pattern": "Player|Game", "min_length": 4,
+        }))
+
+    text = result[0].text
+    check("shows string count", "2 string" in text)
+    check("shows ascii string", "CPlayerClass" in text)
+    check("shows utf-16le", "utf-16le" in text)
+
+
+def test_mock_memory_diff():
+    print("\n--- Mock Memory Diff ---")
+    from main import handle_memory_diff
+
+    # First call: snapshot
+    mock_wrapper = MagicMock()
+    mock_wrapper.memory_diff.return_value = {
+        'action': 'snapshot_taken', 'label': 'health',
+        'address': '0x1a000000', 'size': 256,
+        'message': 'Initial snapshot "health" taken. Call again after a game action to see changes.',
+    }
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_memory_diff({
+            "address": "0x1a000000", "size": 256, "label": "health", "pid": 1234,
+        }))
+
+    text = result[0].text
+    check("snapshot taken message", "snapshot taken" in text.lower() or "Snapshot taken" in text)
+
+    # Second call: diff
+    mock_wrapper.memory_diff.return_value = {
+        'action': 'diff', 'label': 'health',
+        'address': '0x1a000000', 'size': 256,
+        'total_changes': 1, 'bytes_changed': 4,
+        'changes': [{
+            'offset': '0x1c', 'address': '0x1a00001c', 'size': 4,
+            'old': '64000000', 'new': '55000000',
+            'as_int32': '100 -> 85 (delta: -15)',
+            'as_float': '0.0000 -> 0.0000',
+        }],
+    }
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_memory_diff({
+            "address": "0x1a000000", "size": 256, "label": "health", "pid": 1234,
+        }))
+
+    text = result[0].text
+    check("shows change count", "1 region" in text)
+    check("shows int32 interpretation", "100 -> 85" in text)
+    check("shows delta", "delta: -15" in text)
+
+
+def test_demangle_msvc():
+    print("\n--- MSVC Name Demangling ---")
+    from vmm_wrapper import VmmWrapper
+
+    check("simple class", VmmWrapper._demangle_msvc('.?AVCPlayer@@') == 'CPlayer')
+    check("struct", VmmWrapper._demangle_msvc('.?AUVector3@@') == 'Vector3')
+    check("namespace", VmmWrapper._demangle_msvc('.?AVFoo@Bar@@') == 'Bar::Foo')
+    check("deep namespace", VmmWrapper._demangle_msvc('.?AVFoo@Bar@Baz@@') == 'Baz::Bar::Foo')
+    check("no suffix", VmmWrapper._demangle_msvc('.?AVSimple') == 'Simple')
+
+
 def test_error_handling():
     print("\n--- Error Handling ---")
     from main import call_tool, handle_memory_write
@@ -453,6 +638,13 @@ if __name__ == "__main__":
     test_mock_module_exports()
     test_mock_pointer_read()
     test_mock_process_regions()
+    test_mock_pe_sections()
+    test_mock_signature_resolve()
+    test_mock_rtti_scan()
+    test_mock_struct_analyze()
+    test_mock_string_scan()
+    test_mock_memory_diff()
+    test_demangle_msvc()
     test_error_handling()
 
     print("\n" + "=" * 60)
