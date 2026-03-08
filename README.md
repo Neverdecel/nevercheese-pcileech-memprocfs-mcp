@@ -1,47 +1,102 @@
 # nevercheese-pcileech-memprocfs-mcp
 
-A Linux-native [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server for [PCILeech](https://github.com/ufrisk/pcileech) / [MemProcFS](https://github.com/ufrisk/MemProcFS) DMA memory operations.
+A Linux-native [Model Context Protocol](https://modelcontextprotocol.io/) server that gives AI assistants direct access to DMA-based memory operations through [PCILeech](https://github.com/ufrisk/pcileech) / [MemProcFS](https://github.com/ufrisk/MemProcFS).
 
-Built for use with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and other MCP-compatible clients.
+**34 tools** for memory inspection, process analysis, reverse engineering, and game engine SDK extraction — all through natural language.
 
-## What is this?
+## Why this exists
 
-This MCP server lets an AI assistant perform DMA-based memory operations on a target system through a PCILeech-compatible FPGA device. Instead of wrapping the `pcileech.exe` CLI (like [evan7198/mcp_server_pcileech](https://github.com/evan7198/mcp_server_pcileech)), this project uses the native Python bindings directly — no subprocess calls, no text parsing, no Windows dependency.
+DMA hardware lets you read and write the memory of a target system from an external machine over PCIe. This project turns that capability into an MCP server so AI assistants can operate it directly — no manual CLI interaction, no copy-pasting hex dumps.
 
-**Key differences from the original:**
+**What you can do with it:**
 
-| | Original (evan7198) | This project |
+- **Inspect live memory** — read, write, search, dump, and diff memory regions on a target system
+- **Analyze processes** — enumerate processes, modules, exports, imports, PE sections, memory regions
+- **Reverse engineer binaries** — scan for byte patterns, resolve code signatures, discover RTTI class hierarchies
+- **Discover pointer chains** — find stable paths from module bases to dynamic addresses
+- **Find cross-references** — locate all code and data references to any address in a module
+- **Dump game engine SDKs** — extract full C++ SDKs from Unreal Engine 4/5 games via reflection
+- **Extract Unity metadata** — dump IL2CPP class definitions from Unity games automatically
+- **Control FPGA hardware** — benchmark DMA speed, send raw PCIe TLPs, read/write config space
+
+## Key features
+
+### Native Linux implementation
+
+Built on the `memprocfs` and `leechcorepyc` Python packages directly — no subprocess wrapping, no text parsing, no Windows dependency.
+
+| | [Original](https://github.com/evan7198/mcp_server_pcileech) | This project |
 |---|---|---|
-| **Platform** | Windows only | Linux native |
-| **Backend** | Subprocess calls to `pcileech.exe` | Native `memprocfs` + `leechcorepyc` Python packages |
-| **Memory reads** | 256-byte chunks, parsed from text output | Arbitrary size (up to 1MB), direct API calls |
-| **Connection** | New subprocess per operation | Persistent device handle |
-| **Process support** | CLI flag passthrough | Native process/module enumeration via MemProcFS |
+| Platform | Windows only | Linux native |
+| Backend | Subprocess → `pcileech.exe` | Native Python API |
+| Read size | 256-byte chunks | Up to 1MB direct |
+| Connection | New process per op | Persistent handle |
+| Tools | 9 | 34 |
 
-## Tools
+### Game reverse engineering
 
-34 MCP tools organized by capability:
+Go from "I have a DMA device connected to a game" to a full SDK without touching a disassembler:
 
-| Category | Tools |
-|---|---|
-| **Core Memory** | `memory_read`, `memory_write`, `memory_format`, `scatter_read` |
-| **System** | `system_info`, `memory_probe`, `memory_dump`, `memory_search`, `memory_patch`\*, `process_list` |
-| **Address Translation** | `translate_virt2phys`, `process_virt2phys` |
-| **Modules** | `module_list`, `module_dump`, `module_exports`, `module_imports`, `pe_sections` |
-| **Game / RE** | `aob_scan`, `signature_resolve`, `pointer_read`, `process_regions` |
-| **Advanced RE** | `rtti_scan`, `struct_analyze`, `string_scan`, `memory_diff` |
-| **Pointer / XRef** | `pointer_scan`, `xref_scan` |
-| **Engine Tools** | `ue_dump_names`, `ue_dump_objects`, `ue_dump_sdk`, `unity_il2cpp_dump` |
-| **Advanced / FPGA** | `benchmark`, `tlp_send`, `fpga_config` |
+```
+1. "List processes"                           → find the game PID
+2. "List modules for game.exe"                → find module bases
+3. "Scan for RTTI classes in game.exe"        → discover class names + vtables
+4. "Find the GNames signature in game.exe"    → locate UE globals
+5. "Dump the UE5 SDK with GNames and GObjects"→ generate C++ headers
+```
+
+### Pointer chain discovery
+
+Found a dynamic address that changes every restart? Find the static chain:
+
+```
+"Find pointer chains from module bases to 0x1a2b3c4d in game.exe"
+→ [[game.exe+0x1234]+0x10]+0x48   (depth 2)
+→ [[game.exe+0x5678]+0x20]+0x100  (depth 2)
+```
+
+### Cross-reference scanning
+
+Find every instruction and data pointer that references an address:
+
+```
+"Find all xrefs to 0x7ff6a013580 in game.exe"
+→ Code: 0x7ff6a012345 [rip_rel_7] 48 8b 05 35 12 00 00  (.text)
+→ Data: 0x7ff6a101000 (.rdata)
+```
+
+### Engine-specific tools
+
+| Engine | Tools | What you get |
+|---|---|---|
+| **Unreal Engine 4/5** | `ue_dump_names` → `ue_dump_objects` → `ue_dump_sdk` | FName table, UObject list, C++ SDK headers with field offsets |
+| **Unity (IL2CPP)** | `unity_il2cpp_dump` | C# class definitions with fields, methods, and offsets — fully automatic |
+
+## Tools (34)
+
+| Category | Count | Tools |
+|---|---|---|
+| **Core Memory** | 4 | `memory_read` `memory_write` `memory_format` `scatter_read` |
+| **System** | 6 | `system_info` `memory_probe` `memory_dump` `memory_search` `memory_patch`\* `process_list` |
+| **Address Translation** | 2 | `translate_virt2phys` `process_virt2phys` |
+| **Modules** | 5 | `module_list` `module_dump` `module_exports` `module_imports` `pe_sections` |
+| **Game / RE** | 4 | `aob_scan` `signature_resolve` `pointer_read` `process_regions` |
+| **Advanced RE** | 4 | `rtti_scan` `struct_analyze` `string_scan` `memory_diff` |
+| **Pointer / XRef** | 2 | `pointer_scan` `xref_scan` |
+| **Engine Tools** | 4 | `ue_dump_names` `ue_dump_objects` `ue_dump_sdk` `unity_il2cpp_dump` |
+| **FPGA** | 3 | `benchmark` `tlp_send` `fpga_config` |
 
 \* `memory_patch` is stubbed — `.sig` files are a CLI-only feature. Use `memory_search` + `memory_write` instead.
+
+Full parameter reference: [`docs/tools.md`](docs/tools.md)
+UE signature reference: [`docs/ue_signatures.md`](docs/ue_signatures.md)
 
 ## Requirements
 
 - **Linux** (x86_64)
 - **Python 3.10+**
-- **PCILeech-compatible FPGA hardware** (e.g. Screamer, ZDMA, etc.)
-- USB drivers configured (see [MemProcFS Linux setup](https://github.com/ufrisk/MemProcFS/wiki/_Linux))
+- **PCILeech-compatible FPGA hardware** (Screamer, ZDMA, etc.)
+- USB drivers configured ([MemProcFS Linux setup](https://github.com/ufrisk/MemProcFS/wiki/_Linux))
 
 ## Installation
 
@@ -54,7 +109,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### System dependencies (if needed)
+System dependencies (if needed):
 
 ```bash
 sudo apt install libusb-1.0-0-dev libfuse-dev openssl libssl-dev liblz4-dev
@@ -62,7 +117,7 @@ sudo apt install libusb-1.0-0-dev libfuse-dev openssl libssl-dev liblz4-dev
 
 ## Configuration
 
-Edit `config.json` to match your setup:
+Edit `config.json`:
 
 ```json
 {
@@ -77,8 +132,8 @@ Edit `config.json` to match your setup:
 | Field | Description | Examples |
 |---|---|---|
 | `type` | Device type | `"fpga"`, `"file:///path/to/dump.raw"` |
-| `remote` | Remote LeechAgent connection | `""`, `"rpc://user@host"` |
-| `extra_args` | Extra args passed to `memprocfs.Vmm()` | `["-v", "-printf"]` |
+| `remote` | Remote LeechAgent | `""`, `"rpc://user@host"` |
+| `extra_args` | Extra memprocfs args | `["-v", "-printf"]` |
 
 ## Adding to Claude Code
 
@@ -88,7 +143,7 @@ claude mcp add -s user nevercheese-pcileech-memprocfs-mcp -- \
   /path/to/nevercheese-pcileech-memprocfs-mcp/main.py
 ```
 
-Or manually add to your MCP config:
+Or add to your MCP config manually:
 
 ```json
 {
@@ -101,101 +156,75 @@ Or manually add to your MCP config:
 }
 ```
 
-Restart Claude Code after adding.
+## Usage examples
 
-## Usage
+Once connected, use natural language:
 
-Once connected, you can ask Claude to perform memory operations in natural language:
-
+**Memory operations**
 ```
 Read 256 bytes from physical address 0x1000
+Write 90909090 (NOPs) to 0x7ff7f3a90000 in PID 1234
+Search for the MZ header in the first 16MB of memory
+Take a snapshot of 256 bytes at 0x1a000000, then diff after taking damage
 ```
 
+**Process analysis**
 ```
 List all processes on the target system
+Show me modules loaded by explorer.exe
+Show the exports of engine2.dll in cs2.exe
+List PE sections of game.exe with protection flags
 ```
 
+**Reverse engineering**
 ```
-Show me the modules loaded by explorer.exe
-```
-
-```
-Search for the MZ header (4D5A) in the first 16MB of memory
-```
-
-```
-Write 90909090 (NOPs) to address 0x7ff7f3a90000 in process with PID 1234
+Scan for AOB pattern "48 8B 05 ?? ?? ?? ?? 48 85 C0" in game.exe
+Resolve the signature "48 8D 05 ?? ?? ?? ?? EB 27" to find GNames
+Scan for RTTI classes in client.dll
+Analyze the struct at address 0x1a000000 — identify field types
 ```
 
+**Pointer & xref scanning**
 ```
-Run a DMA read benchmark
-```
-
-```
-Scan for the AOB pattern "48 8B 05 ?? ?? ?? ?? 48 85 C0" in game.exe
-```
-
-```
-Dump the client.dll module from the game process to disk
+Find pointer chains from module bases to address 0x1a2b3c4d in PID 1234
+Find all code and data references to 0x7ff6a013580 in game.exe
+Follow the pointer chain [[game.exe+0x1A8B230]+0x50]+0x100 and read 4 bytes
 ```
 
+**Engine SDK extraction**
 ```
-Show me the exports of engine2.dll in process cs2.exe
-```
-
-```
-Follow the pointer chain [[game.exe+0x1A8B230]+0x50]+0x100 in PID 5678 and read 4 bytes
-```
-
-```
-Find all pointer chains from module bases to address 0x1a2b3c4d in PID 1234
-```
-
-```
-Find all code and data references to address 0x7ff6a013580 in game.exe
-```
-
-```
-Dump the UE5 GNames table at address 0x7ff6a500000 from the game process
-```
-
-```
-Generate a full C++ SDK from the Unreal Engine game with GObjects at 0x... and GNames at 0x...
-```
-
-```
-Dump IL2CPP metadata from the Unity game process
+Dump the UE5 GNames table at 0x7ff6a500000 from the game process
+Generate a C++ SDK from the UE game with GObjects at 0x... and GNames at 0x...
+Dump IL2CPP metadata from the Unity game process to /tmp/dump.cs
 ```
 
 ## Testing
-
-Run the test suite (no hardware needed):
 
 ```bash
 source .venv/bin/activate
 python test_server.py
 ```
 
-All 161 tests use mocks and validate the full MCP pipeline without requiring a DMA device.
+161 tests — all use mocks, no hardware needed. Covers tool registration, handler output formatting, and algorithm correctness (pointer scanning, xref scanning with crafted PE binaries).
 
 ## Architecture
 
 ```
-Claude Code
+Claude Code / MCP Client
     |
     | (MCP stdio transport)
     |
-main.py              ← MCP server: tool schemas, handlers, formatting
+main.py                 ← 34 tool schemas + async handlers + output formatting
     |
-vmm_wrapper.py       ← Native wrapper: device init, memory ops, process enum
+vmm_wrapper.py          ← Device init, memory ops, process/module enumeration
     |
     ├── pointer_scanner.py  ← Pointer chain discovery + cross-reference scanning
-    ├── engine_tools.py     ← UE4/UE5 SDK dumping + Unity IL2CPP extraction
+    ├── engine_tools.py     ← UE4/UE5 SDK dump + Unity IL2CPP extraction
     |
-    ├── memprocfs     ← High-level: processes, virtual memory, modules
+    ├── memprocfs           ← High-level API: processes, virtual memory, modules
     |     └── vmmpyc.so → libvmm.so → libleechcore.so
     |
-    └── leechcorepyc  ← Low-level: physical memory, FPGA config, TLP
+    └── leechcorepyc        ← Low-level API: physical memory, FPGA, TLP
           └── leechcore.so
 ```
 
