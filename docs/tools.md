@@ -1,6 +1,6 @@
 # Tool Reference
 
-Complete reference for all 28 MCP tools.
+Complete reference for all 34 MCP tools.
 
 ---
 
@@ -334,3 +334,115 @@ Snapshot and diff a memory region to detect changes (replaces CE scan workflow).
 First call takes a snapshot. Subsequent calls diff against the previous snapshot and report changes with type interpretations (int32, float, etc.).
 
 **Returns:** snapshot confirmation or diff results with changed bytes and interpretations.
+
+---
+
+## Pointer / XRef Scanning
+
+### pointer_scan
+
+Discover unknown pointer chains from static module bases to a target dynamic address. Uses breadth-first reverse scanning to find all paths through pointer dereferences.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `target_address` | string | yes | Dynamic address to find chains to, in hex |
+| `pid` | integer | no | Process ID |
+| `process_name` | string | no | Process name |
+| `max_depth` | integer | no | Maximum chain depth (default: 5, start with 3 for speed) |
+| `max_offset` | integer | no | Maximum offset at each level (default: 4096) |
+| `max_results` | integer | no | Maximum chains to return (default: 100) |
+| `module_filter` | string | no | Only consider this module as root (e.g. `"game.exe"`) |
+
+**Returns:** list of chains with module, base_offset, offsets, depth, and expression (e.g. `[[game.exe+0x1234]+0x10]+0x48`), plus scan statistics.
+
+---
+
+### xref_scan
+
+Find all code instructions and data pointers that reference a target address within a module. Scans `.text` for RIP-relative instructions and `.rdata`/`.data` for raw pointer values.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `target_address` | string | yes | Address to find references to, in hex |
+| `pid` | integer | no | Process ID |
+| `process_name` | string | no | Process name |
+| `module` | string | yes | Module to scan (e.g. `"game.exe"`) |
+| `scan_code` | boolean | no | Scan code sections (default: true) |
+| `scan_data` | boolean | no | Scan data sections (default: true) |
+| `max_results` | integer | no | Maximum references (default: 200) |
+
+**Returns:** code_refs (address, type, instruction bytes, section) and data_refs (address, section, context).
+
+Reference types: `rip_rel_7` (mov/lea/cmp), `rip_rel_6` (jmp/call indirect), `call_e8`, `jmp_e9`.
+
+---
+
+## Engine Tools
+
+### ue_dump_names
+
+Read Unreal Engine FNamePool and dump all name entries. This is step 1 of UE SDK dumping.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `gnames_address` | string | yes | Address of GNames/FNamePool in hex (find via `signature_resolve`) |
+| `pid` | integer | no | Process ID |
+| `process_name` | string | no | Process name |
+| `max_names` | integer | no | Maximum names to dump (default: 200000) |
+| `ue_version` | string | no | `"ue4"` or `"ue5"` (default: `"ue5"`) |
+
+See [UE Signatures Reference](ue_signatures.md) for finding the GNames address.
+
+**Returns:** total name count, blocks read, list of name index→string mappings.
+
+---
+
+### ue_dump_objects
+
+Read Unreal Engine FUObjectArray and dump all UObject entries. This is step 2 of UE SDK dumping.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `gobjects_address` | string | yes | Address of GUObjectArray in hex (find via `signature_resolve`) |
+| `pid` | integer | no | Process ID |
+| `process_name` | string | no | Process name |
+| `gnames_address` | string | no | GNames address for name resolution (highly recommended) |
+| `max_objects` | integer | no | Maximum objects to dump (default: 200000) |
+| `ue_version` | string | no | `"ue4"` or `"ue5"` (default: `"ue5"`) |
+
+**Returns:** total object count, list of objects with index, address, name, class_name, outer, flags.
+
+---
+
+### ue_dump_sdk
+
+Generate C++ SDK headers from the UE reflection system. Walks class hierarchy, enumerates properties with offsets. This is step 3 of UE SDK dumping.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `gobjects_address` | string | yes | Address of GUObjectArray in hex |
+| `gnames_address` | string | yes | Address of GNames/FNamePool in hex |
+| `pid` | integer | no | Process ID |
+| `process_name` | string | no | Process name |
+| `output_file` | string | no | File path for SDK output (can be large; returns summary if omitted) |
+| `max_classes` | integer | no | Maximum classes to process (default: 5000) |
+| `ue_version` | string | no | `"ue4"` or `"ue5"` (default: `"ue5"`) |
+
+**Returns:** total classes/properties, optional output file path, class summary (name, super, size, property count).
+
+---
+
+### unity_il2cpp_dump
+
+Find and parse IL2CPP metadata from a running Unity game. Fully automatic — no addresses needed. Locates GameAssembly.dll, finds the metadata blob (magic `0xFAB11BAF`), and extracts class definitions.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `pid` | integer | no | Process ID |
+| `process_name` | string | no | Process name |
+| `output_file` | string | no | File path for C# class definitions (returns summary if omitted) |
+| `max_classes` | integer | no | Maximum classes to process (default: 5000) |
+
+Supports IL2CPP metadata versions 27-31.
+
+**Returns:** GameAssembly address, metadata address/version, type/field/method counts, class summary.

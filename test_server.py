@@ -74,7 +74,7 @@ def test_mcp_tools():
     from main import server, list_tools
 
     tools = asyncio.run(list_tools())
-    check(f"tool count is 28", len(tools) == 28)
+    check(f"tool count is 34", len(tools) == 34)
 
     expected_names = {
         "memory_read", "memory_write", "memory_format",
@@ -86,6 +86,9 @@ def test_mcp_tools():
         "process_regions", "benchmark", "tlp_send", "fpga_config",
         "scatter_read", "pe_sections", "signature_resolve",
         "rtti_scan", "struct_analyze", "string_scan", "memory_diff",
+        "pointer_scan", "xref_scan",
+        "ue_dump_names", "ue_dump_objects", "ue_dump_sdk",
+        "unity_il2cpp_dump",
     }
     actual_names = {t.name for t in tools}
     check("all expected tools present", actual_names == expected_names)
@@ -577,6 +580,356 @@ def test_demangle_msvc():
     check("no suffix", VmmWrapper._demangle_msvc('.?AVSimple') == 'Simple')
 
 
+def test_mock_pointer_scan():
+    print("\n--- Mock Pointer Scan ---")
+    from main import handle_pointer_scan
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.pointer_scan.return_value = {
+        'chains': [
+            {
+                'module': 'game.exe',
+                'base_offset': 0x1234,
+                'offsets': [0x10, 0x48],
+                'depth': 2,
+                'expression': '[[game.exe+0x1234]+0x10]+0x48',
+            },
+        ],
+        'stats': {
+            'target': '0x1a2b3c4d',
+            'max_depth': 5,
+            'max_offset': 4096,
+            'levels_searched': 3,
+            'total_chains_found': 1,
+            'addresses_scanned': 5000,
+        },
+    }
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_pointer_scan({
+            "target_address": "0x1a2b3c4d", "pid": 1234,
+        }))
+
+    text = result[0].text
+    check("shows chain expression", "game.exe+0x1234" in text)
+    check("shows chain count", "1" in text)
+    check("shows target", "0x1a2b3c4d" in text)
+
+
+def test_mock_xref_scan():
+    print("\n--- Mock XRef Scan ---")
+    from main import handle_xref_scan
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.xref_scan.return_value = {
+        'target': '0x7ff6a013580',
+        'module': 'game.exe',
+        'code_refs': [
+            {
+                'address': '0x7ff6a012345',
+                'type': 'rip_rel_7',
+                'instruction_bytes': '488b05351200',
+                'section': '.text',
+                'displacement': 0x1235,
+            },
+        ],
+        'data_refs': [
+            {
+                'address': '0x7ff6a101000',
+                'section': '.rdata',
+                'context': '8035a0f67f000000',
+            },
+        ],
+        'stats': {
+            'code_sections_scanned': 1,
+            'data_sections_scanned': 2,
+            'total_bytes_scanned': 1048576,
+        },
+    }
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_xref_scan({
+            "target_address": "0x7ff6a013580",
+            "module": "game.exe", "pid": 1234,
+        }))
+
+    text = result[0].text
+    check("shows code ref", "0x7ff6a012345" in text)
+    check("shows ref type", "rip_rel_7" in text)
+    check("shows data ref", "0x7ff6a101000" in text)
+    check("shows code refs count", "Code refs:" in text)
+
+
+def test_mock_ue_dump_names():
+    print("\n--- Mock UE Dump Names ---")
+    from main import handle_ue_dump_names
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.ue_dump_names.return_value = {
+        'gnames_address': '0x7ff6a500000',
+        'total_names': 85000,
+        'blocks_read': 3,
+        'names': [
+            {'index': 0, 'name': 'None'},
+            {'index': 1, 'name': 'ByteProperty'},
+            {'index': 2, 'name': 'IntProperty'},
+        ],
+    }
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_ue_dump_names({
+            "gnames_address": "0x7ff6a500000", "pid": 1234,
+        }))
+
+    text = result[0].text
+    check("shows total names", "85000" in text)
+    check("shows blocks", "3" in text)
+    check("shows name entry", "ByteProperty" in text)
+
+
+def test_mock_ue_dump_objects():
+    print("\n--- Mock UE Dump Objects ---")
+    from main import handle_ue_dump_objects
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.ue_dump_objects.return_value = {
+        'gobjects_address': '0x7ff6a600000',
+        'total_objects': 45000,
+        'objects': [
+            {
+                'index': 0, 'address': '0x1a000000',
+                'name': 'PlayerController', 'class_name': 'Class',
+                'outer': None, 'flags': 0x41,
+            },
+        ],
+    }
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_ue_dump_objects({
+            "gobjects_address": "0x7ff6a600000", "pid": 1234,
+        }))
+
+    text = result[0].text
+    check("shows total objects", "45000" in text)
+    check("shows object name", "PlayerController" in text)
+    check("shows class name", "Class" in text)
+
+
+def test_mock_ue_dump_sdk():
+    print("\n--- Mock UE Dump SDK ---")
+    from main import handle_ue_dump_sdk
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.ue_dump_sdk.return_value = {
+        'gobjects_address': '0x7ff6a600000',
+        'gnames_address': '0x7ff6a500000',
+        'total_classes': 120,
+        'total_properties': 890,
+        'output_file': '/tmp/sdk.h',
+        'classes': [
+            {
+                'name': 'APlayerController',
+                'super': 'AController',
+                'size': 0x5A0,
+                'property_count': 15,
+            },
+        ],
+    }
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_ue_dump_sdk({
+            "gobjects_address": "0x7ff6a600000",
+            "gnames_address": "0x7ff6a500000",
+            "pid": 1234, "output_file": "/tmp/sdk.h",
+        }))
+
+    text = result[0].text
+    check("shows total classes", "120" in text)
+    check("shows total properties", "890" in text)
+    check("shows output file", "/tmp/sdk.h" in text)
+    check("shows class name", "APlayerController" in text)
+    check("shows super class", "AController" in text)
+
+
+def test_mock_unity_il2cpp_dump():
+    print("\n--- Mock Unity IL2CPP Dump ---")
+    from main import handle_unity_il2cpp_dump
+
+    mock_wrapper = MagicMock()
+    mock_wrapper.unity_il2cpp_dump.return_value = {
+        'game_assembly': '0x7ff6a000000',
+        'metadata_address': '0x1b000000',
+        'metadata_version': 29,
+        'total_types': 1234,
+        'total_fields': 5678,
+        'total_methods': 9012,
+        'output_file': '/tmp/il2cpp_dump.cs',
+        'classes': [
+            {
+                'name': 'PlayerController',
+                'namespace': 'Game.Controllers',
+                'field_count': 5,
+                'method_count': 12,
+            },
+        ],
+    }
+
+    with patch('main.get_wrapper', return_value=mock_wrapper):
+        result = asyncio.run(handle_unity_il2cpp_dump({
+            "pid": 1234, "output_file": "/tmp/il2cpp_dump.cs",
+        }))
+
+    text = result[0].text
+    check("shows metadata version", "29" in text)
+    check("shows total types", "1234" in text)
+    check("shows total methods", "9012" in text)
+    check("shows output file", "/tmp/il2cpp_dump.cs" in text)
+    check("shows class name", "PlayerController" in text)
+    check("shows namespace", "Game.Controllers" in text)
+
+
+def test_pointer_scanner_unit():
+    """Unit tests for PointerScanner with crafted data."""
+    print("\n--- Pointer Scanner Unit Tests ---")
+    from pointer_scanner import PointerScanner
+
+    # Create a mock process with controlled memory
+    mock_proc = MagicMock()
+
+    # Module list: one module at base 0x7ff600000000
+    mock_mod = MagicMock()
+    mock_mod.name = 'game.exe'
+    mock_mod.base = 0x7ff600000000
+    mock_mod.image_size = 0x100000
+    mock_proc.module_list.return_value = [mock_mod]
+
+    # VAD list: two regions
+    mock_proc.maps.vad.return_value = [
+        {'start': 0x7ff600000000, 'size': 0x100000},   # module region
+        {'start': 0x1a000000, 'size': 0x10000},         # heap region
+    ]
+
+    target = 0x1a005000
+    # At game.exe+0x1230 (module region, 8-byte aligned), pointer to target
+
+    import memprocfs
+    # Module region data: at offset 0x1230, an 8-byte pointer to target
+    module_data = bytearray(0x100000)
+    struct.pack_into('<Q', module_data, 0x1230, target)
+
+    def mock_read(addr, size, flags=0):
+        if 0x7ff600000000 <= addr < 0x7ff600100000:
+            offset = addr - 0x7ff600000000
+            return bytes(module_data[offset:offset + size])
+        return b'\x00' * size
+
+    mock_proc.memory.read = mock_read
+
+    scanner = PointerScanner(mock_proc)
+    result = scanner.scan(target, max_depth=1, max_offset=0, max_results=10)
+
+    check("returns dict with chains", 'chains' in result)
+    check("returns dict with stats", 'stats' in result)
+    check("found at least one chain", len(result['chains']) >= 1)
+
+    if result['chains']:
+        chain = result['chains'][0]
+        check("chain has module", chain['module'] == 'game.exe')
+        check("chain has base_offset 0x1230", chain['base_offset'] == 0x1230)
+        check("chain has expression", 'game.exe' in chain['expression'])
+
+
+def test_xref_scanner_unit():
+    """Unit tests for XRefScanner with crafted binary data."""
+    print("\n--- XRef Scanner Unit Tests ---")
+    from pointer_scanner import XRefScanner
+
+    mock_proc = MagicMock()
+
+    # Module at base 0x7ff600000000
+    mock_mod = MagicMock()
+    mock_mod.base = 0x7ff600000000
+    mock_mod.image_size = 0x10000
+    mock_proc.module.return_value = mock_mod
+
+    # Build a fake PE with .text and .rdata sections
+    # DOS header: e_lfanew at offset 0x3C = 0x80
+    # PE header at 0x80: signature + COFF header + optional header
+    # Sections at 0x80 + 24 + 240 (x64 optional header size)
+
+    pe_data = bytearray(0x10000)
+
+    # DOS header
+    struct.pack_into('<H', pe_data, 0, 0x5A4D)  # MZ
+    struct.pack_into('<I', pe_data, 0x3C, 0x80)  # e_lfanew
+
+    # PE signature
+    struct.pack_into('<I', pe_data, 0x80, 0x4550)  # PE\0\0
+
+    # COFF header (20 bytes at 0x84)
+    struct.pack_into('<H', pe_data, 0x84, 0x8664)  # Machine = AMD64
+    struct.pack_into('<H', pe_data, 0x86, 2)  # NumberOfSections = 2
+    struct.pack_into('<H', pe_data, 0x94, 240)  # SizeOfOptionalHeader
+
+    # Section headers start at 0x80 + 4 + 20 + 240 = 0x188
+    sec_offset = 0x188
+
+    # .text section
+    pe_data[sec_offset:sec_offset + 8] = b'.text\x00\x00\x00'
+    struct.pack_into('<I', pe_data, sec_offset + 8, 0x1000)  # VirtualSize
+    struct.pack_into('<I', pe_data, sec_offset + 12, 0x1000)  # VirtualAddress (RVA)
+    struct.pack_into('<I', pe_data, sec_offset + 16, 0x1000)  # SizeOfRawData
+    struct.pack_into('<I', pe_data, sec_offset + 36, 0x60000020)  # CODE|EXECUTE|READ
+
+    # .rdata section
+    sec_offset += 40
+    pe_data[sec_offset:sec_offset + 8] = b'.rdata\x00\x00'
+    struct.pack_into('<I', pe_data, sec_offset + 8, 0x1000)  # VirtualSize
+    struct.pack_into('<I', pe_data, sec_offset + 12, 0x2000)  # VirtualAddress (RVA)
+    struct.pack_into('<I', pe_data, sec_offset + 16, 0x1000)  # SizeOfRawData
+    struct.pack_into('<I', pe_data, sec_offset + 36, 0x40000040)  # INITIALIZED_DATA|READ
+
+    # Target address for xrefs
+    base = 0x7ff600000000
+    target = base + 0x5000
+
+    # Put a 7-byte RIP-relative instruction in .text at RVA 0x1100
+    # mov rax, [rip + disp32] where disp resolves to target
+    # instruction at base + 0x1100, length 7, target = base + 0x1100 + 7 + disp
+    # disp = target - (base + 0x1100 + 7) = 0x5000 - 0x1107 = 0x3EF9
+    disp = target - (base + 0x1100 + 7)
+    pe_data[0x1100] = 0x48  # REX.W
+    pe_data[0x1101] = 0x8B  # MOV
+    pe_data[0x1102] = 0x05  # ModRM (rip-relative)
+    struct.pack_into('<i', pe_data, 0x1103, disp)
+
+    # Put a data pointer in .rdata at RVA 0x2100 pointing to target
+    struct.pack_into('<Q', pe_data, 0x2100, target)
+
+    import memprocfs
+
+    def mock_read(addr, size, flags=0):
+        offset = addr - base
+        if 0 <= offset < len(pe_data):
+            end = min(offset + size, len(pe_data))
+            result = pe_data[offset:end]
+            if len(result) < size:
+                result += b'\x00' * (size - len(result))
+            return bytes(result)
+        return b'\x00' * size
+
+    mock_proc.memory.read = mock_read
+
+    scanner = XRefScanner(mock_proc)
+    result = scanner.scan(target, module_name='game.exe')
+
+    check("returns code_refs", 'code_refs' in result)
+    check("returns data_refs", 'data_refs' in result)
+    check("returns stats", 'stats' in result)
+    check("found code xref", len(result['code_refs']) >= 1)
+    check("found data xref", len(result['data_refs']) >= 1)
+
+
 def test_error_handling():
     print("\n--- Error Handling ---")
     from main import call_tool, handle_memory_write
@@ -645,6 +998,14 @@ if __name__ == "__main__":
     test_mock_string_scan()
     test_mock_memory_diff()
     test_demangle_msvc()
+    test_mock_pointer_scan()
+    test_mock_xref_scan()
+    test_mock_ue_dump_names()
+    test_mock_ue_dump_objects()
+    test_mock_ue_dump_sdk()
+    test_mock_unity_il2cpp_dump()
+    test_pointer_scanner_unit()
+    test_xref_scanner_unit()
     test_error_handling()
 
     print("\n" + "=" * 60)

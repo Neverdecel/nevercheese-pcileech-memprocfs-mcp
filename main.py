@@ -3,7 +3,7 @@
 Linux-native MCP Server for PCILeech / MemProcFS.
 
 Uses memprocfs and leechcorepyc Python packages directly instead of
-wrapping the pcileech CLI. Provides 28 MCP tools for DMA-based
+wrapping the pcileech CLI. Provides 34 MCP tools for DMA-based
 memory operations via the Model Context Protocol.
 """
 
@@ -794,6 +794,221 @@ async def list_tools() -> list[Tool]:
                 "required": ["address", "size"],
             },
         ),
+        # ==================== Pointer / XRef Scanning ====================
+        Tool(
+            name="pointer_scan",
+            description=(
+                "Discover unknown pointer chains from static module bases to a target address. "
+                "Given a known dynamic address (e.g. player object at 0x1a2b3c4d), finds all paths "
+                "from module bases through pointer dereferences that reach it. "
+                "Use this when you have a dynamic address but need a stable pointer chain for automation. "
+                "WARNING: Can be slow for deep scans — start with max_depth=3."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target_address": {
+                        "type": "string",
+                        "description": "Dynamic address to find chains to, in hex.",
+                    },
+                    "pid": {"type": "integer", "description": "Process ID. Mutually exclusive with process_name."},
+                    "process_name": {"type": "string", "description": "Process name. Mutually exclusive with pid."},
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Maximum pointer chain depth. Default: 5. Start with 3 for speed.",
+                        "default": 5, "minimum": 1, "maximum": 10,
+                    },
+                    "max_offset": {
+                        "type": "integer",
+                        "description": "Maximum offset at each pointer level. Default: 4096.",
+                        "default": 4096, "minimum": 0, "maximum": 65536,
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum chains to return. Default: 100.",
+                        "default": 100,
+                    },
+                    "module_filter": {
+                        "type": "string",
+                        "description": "Only consider this module as chain root (e.g. 'game.exe'). Faster than scanning all modules.",
+                    },
+                },
+                "required": ["target_address"],
+            },
+        ),
+        Tool(
+            name="xref_scan",
+            description=(
+                "Find all code instructions and data pointers that reference a target address. "
+                "Scans a module's .text section for RIP-relative instructions (mov, lea, call, jmp) "
+                "and .rdata/.data sections for raw pointer values that point to the target. "
+                "Essential for understanding how a function or variable is used — find all callers "
+                "of a function, all readers of a global variable, or all vtable entries."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target_address": {
+                        "type": "string",
+                        "description": "Address to find references to, in hex.",
+                    },
+                    "pid": {"type": "integer", "description": "Process ID. Mutually exclusive with process_name."},
+                    "process_name": {"type": "string", "description": "Process name. Mutually exclusive with pid."},
+                    "module": {
+                        "type": "string",
+                        "description": "Module to scan for references (e.g. 'game.exe'). Required.",
+                    },
+                    "scan_code": {
+                        "type": "boolean",
+                        "description": "Scan code sections for instruction references. Default: true.",
+                        "default": True,
+                    },
+                    "scan_data": {
+                        "type": "boolean",
+                        "description": "Scan data sections for pointer values. Default: true.",
+                        "default": True,
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum references to return. Default: 200.",
+                        "default": 200,
+                    },
+                },
+                "required": ["target_address", "module"],
+            },
+        ),
+        # ==================== Engine Tools ====================
+        Tool(
+            name="ue_dump_names",
+            description=(
+                "Read Unreal Engine FNamePool and dump all name entries from a running UE game. "
+                "Requires the GNames/FNamePool address — find it using signature_resolve with known "
+                "UE signatures (see docs/ue_signatures.md). Returns name index→string mappings. "
+                "This is step 1 of UE SDK dumping: dump names → dump objects → dump SDK."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "gnames_address": {
+                        "type": "string",
+                        "description": "Address of GNames/FNamePool in hex. Find via signature_resolve.",
+                    },
+                    "pid": {"type": "integer", "description": "Process ID. Mutually exclusive with process_name."},
+                    "process_name": {"type": "string", "description": "Process name. Mutually exclusive with pid."},
+                    "max_names": {
+                        "type": "integer",
+                        "description": "Maximum names to dump. Default: 200000.",
+                        "default": 200000,
+                    },
+                    "ue_version": {
+                        "type": "string", "enum": ["ue4", "ue5"],
+                        "description": "Unreal Engine version. Default: 'ue5'.",
+                        "default": "ue5",
+                    },
+                },
+                "required": ["gnames_address"],
+            },
+        ),
+        Tool(
+            name="ue_dump_objects",
+            description=(
+                "Read Unreal Engine FUObjectArray and dump all UObject entries from a running UE game. "
+                "Requires the GObjects/FUObjectArray address — find it using signature_resolve. "
+                "Optionally provide GNames address to resolve object names (otherwise names show as indices). "
+                "This is step 2 of UE SDK dumping: dump names → dump objects → dump SDK."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "gobjects_address": {
+                        "type": "string",
+                        "description": "Address of GUObjectArray in hex. Find via signature_resolve.",
+                    },
+                    "pid": {"type": "integer", "description": "Process ID. Mutually exclusive with process_name."},
+                    "process_name": {"type": "string", "description": "Process name. Mutually exclusive with pid."},
+                    "gnames_address": {
+                        "type": "string",
+                        "description": "Address of GNames/FNamePool for name resolution. Highly recommended.",
+                    },
+                    "max_objects": {
+                        "type": "integer",
+                        "description": "Maximum objects to dump. Default: 200000.",
+                        "default": 200000,
+                    },
+                    "ue_version": {
+                        "type": "string", "enum": ["ue4", "ue5"],
+                        "description": "Unreal Engine version. Default: 'ue5'.",
+                        "default": "ue5",
+                    },
+                },
+                "required": ["gobjects_address"],
+            },
+        ),
+        Tool(
+            name="ue_dump_sdk",
+            description=(
+                "Generate C++ SDK headers from UE reflection system. Walks the class hierarchy, "
+                "enumerates properties with offsets, and outputs struct definitions usable in C++. "
+                "Requires both GNames and GObjects addresses. Optionally writes to a file (can be large). "
+                "This is step 3 of UE SDK dumping: dump names → dump objects → dump SDK."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "gobjects_address": {
+                        "type": "string",
+                        "description": "Address of GUObjectArray in hex.",
+                    },
+                    "gnames_address": {
+                        "type": "string",
+                        "description": "Address of GNames/FNamePool in hex.",
+                    },
+                    "pid": {"type": "integer", "description": "Process ID. Mutually exclusive with process_name."},
+                    "process_name": {"type": "string", "description": "Process name. Mutually exclusive with pid."},
+                    "output_file": {
+                        "type": "string",
+                        "description": "File path to write SDK headers. If omitted, returns summary only.",
+                    },
+                    "max_classes": {
+                        "type": "integer",
+                        "description": "Maximum classes to process. Default: 5000.",
+                        "default": 5000,
+                    },
+                    "ue_version": {
+                        "type": "string", "enum": ["ue4", "ue5"],
+                        "description": "Unreal Engine version. Default: 'ue5'.",
+                        "default": "ue5",
+                    },
+                },
+                "required": ["gobjects_address", "gnames_address"],
+            },
+        ),
+        Tool(
+            name="unity_il2cpp_dump",
+            description=(
+                "Find and parse IL2CPP metadata from a running Unity game. Automatically locates "
+                "GameAssembly.dll, finds the metadata blob (magic 0xFAB11BAF), and extracts class "
+                "definitions with fields, methods, and offsets. Supports metadata versions 27-31. "
+                "Outputs C#-style class definitions. No addresses needed — fully automatic discovery."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pid": {"type": "integer", "description": "Process ID. Mutually exclusive with process_name."},
+                    "process_name": {"type": "string", "description": "Process name. Mutually exclusive with pid."},
+                    "output_file": {
+                        "type": "string",
+                        "description": "File path to write C# class definitions. If omitted, returns summary only.",
+                    },
+                    "max_classes": {
+                        "type": "integer",
+                        "description": "Maximum classes to process. Default: 5000.",
+                        "default": 5000,
+                    },
+                },
+                "required": [],
+            },
+        ),
         # ==================== Advanced / FPGA ====================
         Tool(
             name="benchmark",
@@ -917,6 +1132,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "struct_analyze": handle_struct_analyze,
             "string_scan": handle_string_scan,
             "memory_diff": handle_memory_diff,
+            "pointer_scan": handle_pointer_scan,
+            "xref_scan": handle_xref_scan,
+            "ue_dump_names": handle_ue_dump_names,
+            "ue_dump_objects": handle_ue_dump_objects,
+            "ue_dump_sdk": handle_ue_dump_sdk,
+            "unity_il2cpp_dump": handle_unity_il2cpp_dump,
             "benchmark": handle_benchmark,
             "tlp_send": handle_tlp_send,
             "fpga_config": handle_fpga_config,
@@ -1600,6 +1821,245 @@ async def handle_memory_diff(args: dict) -> list[TextContent]:
 
             if len(result['changes']) > 50:
                 parts.append(f"\n... and {len(result['changes']) - 50} more changes (truncated)")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_pointer_scan(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    result = await asyncio.to_thread(
+        w.pointer_scan,
+        args["target_address"],
+        pid=pid, process_name=process_name,
+        max_depth=args.get("max_depth", 5),
+        max_offset=args.get("max_offset", 4096),
+        max_results=args.get("max_results", 100),
+        module_filter=args.get("module_filter"),
+    )
+
+    stats = result.get('stats', {})
+    parts = [f"## Pointer Scan Results", "=" * 50, "",
+             f"**Target:** {stats.get('target', args['target_address'])}",
+             f"**Depth:** {stats.get('levels_searched', 0)}/{stats.get('max_depth', 0)}",
+             f"**Addresses scanned:** {stats.get('addresses_scanned', 0)}",
+             f"**Chains found:** {stats.get('total_chains_found', 0)}\n"]
+
+    chains = result.get('chains', [])
+    if not chains:
+        parts.append("No pointer chains found.")
+    else:
+        for i, c in enumerate(chains[:50], 1):
+            parts.append(f"{i}. `{c['expression']}` (depth {c['depth']})")
+            parts.append(f"   module: {c['module']}, base_offset: 0x{c['base_offset']:x}")
+
+        if len(chains) > 50:
+            parts.append(f"\n... and {len(chains) - 50} more chains")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_xref_scan(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    result = await asyncio.to_thread(
+        w.xref_scan,
+        args["target_address"],
+        pid=pid, process_name=process_name,
+        module=args["module"],
+        scan_code=args.get("scan_code", True),
+        scan_data=args.get("scan_data", True),
+        max_results=args.get("max_results", 200),
+    )
+
+    code_refs = result.get('code_refs', [])
+    data_refs = result.get('data_refs', [])
+    stats = result.get('stats', {})
+
+    parts = [f"## XRef Scan: {result.get('module', args['module'])}", "=" * 50, "",
+             f"**Target:** {result.get('target', args['target_address'])}",
+             f"**Code refs:** {len(code_refs)}",
+             f"**Data refs:** {len(data_refs)}",
+             f"**Bytes scanned:** {stats.get('total_bytes_scanned', 0)}\n"]
+
+    if code_refs:
+        parts.append("### Code References")
+        for i, r in enumerate(code_refs[:100], 1):
+            parts.append(f"{i}. **{r['address']}** [{r['type']}] `{r.get('instruction_bytes', '')}`  ({r['section']})")
+
+    if data_refs:
+        parts.append("\n### Data References")
+        for i, r in enumerate(data_refs[:100], 1):
+            parts.append(f"{i}. **{r['address']}**  ({r['section']})  `{r.get('context', '')}`")
+
+    if not code_refs and not data_refs:
+        parts.append("No references found.")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_ue_dump_names(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    result = await asyncio.to_thread(
+        w.ue_dump_names,
+        args["gnames_address"],
+        pid=pid, process_name=process_name,
+        max_names=args.get("max_names", 200000),
+        ue_version=args.get("ue_version", "ue5"),
+    )
+
+    parts = [f"## UE Name Dump", "=" * 50, "",
+             f"**GNames address:** {result.get('gnames_address', args['gnames_address'])}",
+             f"**Total names:** {result.get('total_names', 0)}",
+             f"**Blocks read:** {result.get('blocks_read', 0)}\n"]
+
+    names = result.get('names', [])
+    parts.append(f"### First {min(len(names), 50)} names:")
+    for n in names[:50]:
+        parts.append(f"  [{n['index']}] {n['name']}")
+
+    if len(names) > 50:
+        parts.append(f"\n... and {len(names) - 50} more names")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_ue_dump_objects(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    result = await asyncio.to_thread(
+        w.ue_dump_objects,
+        args["gobjects_address"],
+        pid=pid, process_name=process_name,
+        gnames_address=args.get("gnames_address"),
+        max_objects=args.get("max_objects", 200000),
+        ue_version=args.get("ue_version", "ue5"),
+    )
+
+    parts = [f"## UE Object Dump", "=" * 50, "",
+             f"**GObjects address:** {result.get('gobjects_address', args['gobjects_address'])}",
+             f"**Total objects:** {result.get('total_objects', 0)}\n"]
+
+    objects = result.get('objects', [])
+    parts.append(f"### First {min(len(objects), 50)} objects:")
+    for o in objects[:50]:
+        line = f"  [{o['index']}] {o.get('name', '?')} ({o.get('class_name', '?')})"
+        if o.get('outer'):
+            line += f" in {o['outer']}"
+        parts.append(line)
+
+    if len(objects) > 50:
+        parts.append(f"\n... and {len(objects) - 50} more objects")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_ue_dump_sdk(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    result = await asyncio.to_thread(
+        w.ue_dump_sdk,
+        args["gobjects_address"],
+        args["gnames_address"],
+        pid=pid, process_name=process_name,
+        output_file=args.get("output_file"),
+        max_classes=args.get("max_classes", 5000),
+        ue_version=args.get("ue_version", "ue5"),
+    )
+
+    parts = [f"## UE SDK Dump", "=" * 50, "",
+             f"**Total classes:** {result.get('total_classes', 0)}",
+             f"**Total properties:** {result.get('total_properties', 0)}"]
+
+    if result.get('output_file'):
+        parts.append(f"**Output file:** {result['output_file']}")
+
+    classes = result.get('classes', [])
+    if classes:
+        parts.append(f"\n### Class summary ({min(len(classes), 50)} shown):")
+        for c in classes[:50]:
+            super_str = f" : {c['super']}" if c.get('super') else ""
+            parts.append(f"  {c['name']}{super_str} (0x{c['size']:x}, {c['property_count']} props)")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_unity_il2cpp_dump(args: dict) -> list[TextContent]:
+    pid = args.get("pid")
+    process_name = args.get("process_name")
+
+    error = validate_mutually_exclusive(args, "pid", "process_name")
+    if error:
+        return [TextContent(type="text", text=f"Parameter error: {error}")]
+    if pid is None and process_name is None:
+        return [TextContent(type="text", text="Error: pid or process_name is required")]
+
+    w = get_wrapper()
+    result = await asyncio.to_thread(
+        w.unity_il2cpp_dump,
+        pid=pid, process_name=process_name,
+        output_file=args.get("output_file"),
+        max_classes=args.get("max_classes", 5000),
+    )
+
+    parts = [f"## Unity IL2CPP Dump", "=" * 50, "",
+             f"**GameAssembly:** {result.get('game_assembly', 'N/A')}",
+             f"**Metadata address:** {result.get('metadata_address', 'N/A')}",
+             f"**Metadata version:** {result.get('metadata_version', 'N/A')}",
+             f"**Total types:** {result.get('total_types', 0)}",
+             f"**Total fields:** {result.get('total_fields', 0)}",
+             f"**Total methods:** {result.get('total_methods', 0)}"]
+
+    if result.get('output_file'):
+        parts.append(f"**Output file:** {result['output_file']}")
+
+    classes = result.get('classes', [])
+    if classes:
+        parts.append(f"\n### Classes ({min(len(classes), 50)} shown):")
+        for c in classes[:50]:
+            ns = f"{c['namespace']}." if c.get('namespace') else ""
+            parts.append(f"  {ns}{c['name']} ({c.get('field_count', 0)} fields, {c.get('method_count', 0)} methods)")
 
     return [TextContent(type="text", text="\n".join(parts))]
 
