@@ -3,7 +3,7 @@
 Linux-native MCP Server for PCILeech / MemProcFS.
 
 Uses memprocfs and leechcorepyc Python packages directly instead of
-wrapping the pcileech CLI. Provides 34 MCP tools for DMA-based
+wrapping the pcileech CLI. Provides 37 MCP tools for DMA-based
 memory operations via the Model Context Protocol.
 """
 
@@ -1098,6 +1098,49 @@ async def list_tools() -> list[Tool]:
                 "required": [],
             },
         ),
+
+        # ==================== Device Lifecycle ====================
+        Tool(
+            name="device_disconnect",
+            description=(
+                "Disconnect from the DMA/FPGA device, freeing it for external use. "
+                "Call this when you're done with memory analysis and the user wants to test "
+                "their own DMA solution against the FPGA device. The device handle is released "
+                "so other programs can claim it. Use device_reconnect to resume MCP operations later."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
+        Tool(
+            name="device_reconnect",
+            description=(
+                "Reconnect to the DMA/FPGA device after a previous device_disconnect. "
+                "Re-establishes the MemProcFS and LeechCore handles so MCP tools work again. "
+                "Call this when the user is done testing their own DMA code and wants to "
+                "resume using MCP tools for memory analysis."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
+        Tool(
+            name="device_status",
+            description=(
+                "Check the current DMA/FPGA device connection status. "
+                "Reports whether MemProcFS (VMM) and LeechCore (LC) handles are active, "
+                "and basic device info if connected."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
     ]
 
 
@@ -1141,6 +1184,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             "benchmark": handle_benchmark,
             "tlp_send": handle_tlp_send,
             "fpga_config": handle_fpga_config,
+            "device_disconnect": handle_device_disconnect,
+            "device_reconnect": handle_device_reconnect,
+            "device_status": handle_device_status,
         }
         handler = handlers.get(name)
         if handler is None:
@@ -2131,6 +2177,105 @@ async def handle_fpga_config(args: dict) -> list[TextContent]:
     else:
         parts.append(f"**Address:** {result.get('address')}")
         parts.append(f"**Bytes written:** {result.get('bytes_written')}")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+# ==================== Device Lifecycle Handlers ====================
+
+async def handle_device_disconnect(args: dict) -> list[TextContent]:
+    global wrapper
+    if wrapper is None:
+        return [TextContent(type="text", text="Device is already disconnected (no active connection).")]
+
+    was_vmm = wrapper._vmm is not None
+    was_lc = wrapper._lc is not None
+    await asyncio.to_thread(wrapper.close)
+    wrapper = None
+
+    parts = ["## Device Disconnected", "=" * 50, ""]
+    if was_vmm:
+        parts.append("- MemProcFS (VMM) handle released")
+    if was_lc:
+        parts.append("- LeechCore (LC) handle released")
+    if not was_vmm and not was_lc:
+        parts.append("- No active handles were open (lazy init hadn't triggered)")
+    parts.append("")
+    parts.append("The FPGA device is now free for external use.")
+    parts.append("Use **device_reconnect** when you want to resume MCP operations.")
+
+    return [TextContent(type="text", text="\n".join(parts))]
+
+
+async def handle_device_reconnect(args: dict) -> list[TextContent]:
+    global wrapper
+    # Close any stale state first
+    if wrapper is not None:
+        await asyncio.to_thread(wrapper.close)
+        wrapper = None
+
+    try:
+        wrapper = VmmWrapper()
+        # Force immediate connection to verify device is available
+        await asyncio.to_thread(wrapper._get_vmm)
+        vmm = wrapper._vmm
+        info_parts = []
+        try:
+            mem_map = vmm.maps.memmap()
+            if mem_map:
+                max_addr = max(e['pa'] + e['cb'] for e in mem_map)
+                info_parts.append(f"- Physical memory: {max_addr / (1024**3):.1f} GB")
+        except Exception:
+            pass
+
+        parts = ["## Device Reconnected", "=" * 50, ""]
+        parts.append("- MemProcFS (VMM) handle established")
+        parts.extend(info_parts)
+        parts.append("")
+        parts.append("All MCP tools are operational again.")
+
+        return [TextContent(type="text", text="\n".join(parts))]
+    except Exception as e:
+        wrapper = None
+        return [TextContent(type="text", text=(
+            f"## Reconnection Failed\n\n"
+            f"Could not reconnect to device: {e}\n\n"
+            f"Make sure no other program is holding the FPGA device and try again."
+        ))]
+
+
+async def handle_device_status(args: dict) -> list[TextContent]:
+    parts = ["## Device Status", "=" * 50, ""]
+
+    if wrapper is None:
+        parts.append("**Connection:** Disconnected")
+        parts.append("")
+        parts.append("No wrapper instance exists. Use any MCP tool or **device_reconnect** to connect.")
+        return [TextContent(type="text", text="\n".join(parts))]
+
+    vmm_active = wrapper._vmm is not None
+    lc_active = wrapper._lc is not None
+
+    if not vmm_active and not lc_active:
+        parts.append("**Connection:** Idle (lazy init — not yet connected)")
+        parts.append("")
+        parts.append("Wrapper exists but no device handles are open yet. "
+                     "They will be created on first tool use.")
+    else:
+        parts.append("**Connection:** Active")
+        parts.append(f"- VMM (MemProcFS): {'connected' if vmm_active else 'not initialized'}")
+        parts.append(f"- LC (LeechCore): {'connected' if lc_active else 'not initialized'}")
+        parts.append(f"- Device type: {wrapper._device_type}")
+        if wrapper._remote:
+            parts.append(f"- Remote: {wrapper._remote}")
+        if vmm_active:
+            try:
+                proc_list = wrapper._vmm.process_list()
+                parts.append(f"- Processes visible: {len(proc_list)}")
+            except Exception:
+                pass
+        if wrapper._snapshots:
+            parts.append(f"- Memory diff snapshots: {len(wrapper._snapshots)}")
 
     return [TextContent(type="text", text="\n".join(parts))]
 
